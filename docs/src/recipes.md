@@ -9,12 +9,30 @@ These recipes are starting points — adapt the commands to your setup.
 
 Databases should never be backed up by copying their data files while running. Use the database's own dump tool to produce a consistent export.
 
+Where possible, use **command dumps** — they stream stdout directly into the backup without temporary files. For tools that can't stream to stdout, use **hooks** to dump to a temporary directory, back it up, then clean up.
 
-### Using hooks
 
-Hooks run shell commands before and after a backup. For databases, dump to a temporary directory, back it up, then clean up. This approach works with any tool and gives you full control.
+### PostgreSQL
 
-**PostgreSQL:**
+```yaml
+sources:
+  - label: postgres
+    command_dumps:
+      - name: mydb.dump
+        command: "pg_dump -U myuser -Fc mydb"
+```
+
+For all databases at once:
+
+```yaml
+sources:
+  - label: postgres
+    command_dumps:
+      - name: all.sql
+        command: "pg_dumpall -U postgres"
+```
+
+If you need to run additional steps around the dump (e.g. custom authentication, pre/post scripts), use hooks instead. Note that this saves the dump to disk instead of reading it directly with the `command_dump` feature.
 
 ```yaml
 sources:
@@ -27,7 +45,18 @@ sources:
       after: "rm -rf /var/backups/postgres"
 ```
 
-**MySQL / MariaDB:**
+
+### MySQL / MariaDB
+
+```yaml
+sources:
+  - label: mysql
+    command_dumps:
+      - name: all.sql
+        command: "mysqldump -u root -p\"$MYSQL_ROOT_PASSWORD\" --all-databases"
+```
+
+With hooks:
 
 ```yaml
 sources:
@@ -42,41 +71,7 @@ sources:
 ```
 
 
-### Using command dumps
-
-Command dumps stream a command's stdout directly into the backup without writing temporary files to disk. This is simpler and more efficient for any tool that supports dumping to stdout.
-
-**PostgreSQL:**
-
-```yaml
-sources:
-  - label: postgres
-    command_dumps:
-      - name: mydb.dump
-        command: "pg_dump -U myuser -Fc mydb"
-```
-
-**PostgreSQL (all databases):**
-
-```yaml
-sources:
-  - label: postgres
-    command_dumps:
-      - name: all.sql
-        command: "pg_dumpall -U postgres"
-```
-
-**MySQL / MariaDB:**
-
-```yaml
-sources:
-  - label: mysql
-    command_dumps:
-      - name: all.sql
-        command: "mysqldump -u root -p\"$MYSQL_ROOT_PASSWORD\" --all-databases"
-```
-
-**MongoDB:**
+### MongoDB
 
 ```yaml
 sources:
@@ -86,7 +81,7 @@ sources:
         command: "mongodump --archive --gzip --db mydb"
 ```
 
-For all MongoDB databases, omit `--db`:
+For all databases, omit `--db`:
 
 ```yaml
 sources:
@@ -96,9 +91,10 @@ sources:
         command: "mongodump --archive --gzip"
 ```
 
-**SQLite:**
 
-SQLite can't stream to stdout, so use a hook instead. Copying the database file directly risks corruption if a process holds a write lock.
+### SQLite
+
+SQLite can't stream to stdout, so use a hook. Copying the database file directly risks corruption if a process holds a write lock.
 
 ```yaml
 sources:
@@ -111,7 +107,8 @@ sources:
       after: "rm -rf /var/backups/sqlite"
 ```
 
-**Redis:**
+
+### Redis
 
 ```yaml
 sources:
@@ -159,7 +156,7 @@ sources:
     label: wiki
     hooks:
       before: "docker stop wiki"
-      after:  "docker start wiki"
+      finally: "docker start wiki"
 ```
 
 
@@ -219,6 +216,41 @@ sources:
   - path: /var/lib/docker/volumes/uploads/_data
     label: uploads
 ```
+
+
+## Virtual Machine Disk Images
+
+Virtual machine disk images are an excellent use case for deduplicated backups. Large portions of a VM's disk remain unchanged between snapshots, so V'Ger's content-defined chunking achieves high deduplication ratios — often reducing storage to a fraction of the raw image size.
+
+### Prerequisites
+
+The guest VM must have the QEMU guest agent installed and running, and QEMU must be started with a guest agent socket (e.g. `-chardev socket,path=/tmp/qga.sock,server=on,wait=off,id=qga0`). Install `socat` on the host if not already present.
+
+
+### Freeze, Backup, Thaw
+
+Use hooks to freeze the guest filesystem before backing up the disk image, then thaw it afterwards:
+
+```yaml
+sources:
+  - path: /var/lib/libvirt/images
+    label: vm-images
+    hooks:
+      before: >
+        echo '{"execute":"guest-fsfreeze-freeze"}' |
+        socat - unix-connect:/tmp/qga.sock
+      finally: >
+        echo '{"execute":"guest-fsfreeze-thaw"}' |
+        socat - unix-connect:/tmp/qga.sock
+```
+
+The freeze ensures the filesystem is in a clean state while V'Ger reads the image. For incremental backups (every run after the first), only changed chunks are processed, so the freeze window is short.
+
+### Tips
+
+- **Raw images dedup better than qcow2.** The qcow2 format uses internal copy-on-write structures that can shuffle data, reducing byte-level similarity between snapshots. If practical, convert with `qemu-img convert -f qcow2 -O raw`.
+- **Multiple VMs in one repo** provides cross-VM deduplication. VMs running the same OS share many common chunks.
+- For environments that cannot tolerate any guest I/O pause, use QEMU external snapshots instead. This redirects writes to an overlay file via QMP `blockdev-snapshot-sync`, allowing the base image to be backed up with zero interruption. This is the approach used by Proxmox VE and libvirt.
 
 
 ## Filesystem Snapshots
