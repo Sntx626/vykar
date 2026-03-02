@@ -14,6 +14,7 @@ use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem, Submenu};
 use tray_icon::{Icon, TrayIconBuilder};
 use vykar_core::app::{self, operations, passphrase};
 use vykar_core::commands::find::{FileStatus, FindFilter, FindScope};
+use vykar_core::commands::init;
 use vykar_core::config::{self, ResolvedRepo, ScheduleConfig};
 use vykar_core::snapshot::item::{Item, ItemType};
 use vykar_types::error::VykarError;
@@ -1904,7 +1905,150 @@ fn run_worker(
                             labels.push(repo_name);
                         }
                         Err(e) => {
-                            send_log(&ui_tx, format!("[{repo_name}] info failed: {e}"));
+                            if matches!(e, VykarError::RepoNotFound(_)) {
+                                let confirmed = tinyfiledialogs::message_box_yes_no(
+                                    &format!("{APP_TITLE} — Repository Not Initialized"),
+                                    &format!(
+                                        "Repository {repo_name} at {url} is not initialized.\n\
+                                         Would you like to initialize it now?",
+                                    ),
+                                    tinyfiledialogs::MessageBoxIcon::Question,
+                                    tinyfiledialogs::YesNo::Yes,
+                                );
+                                if confirmed == tinyfiledialogs::YesNo::Yes {
+                                    // Resolve passphrase for init following the canonical rule:
+                                    // 1. encryption: none → None
+                                    // 2. Configured source (passphrase field / passcommand)
+                                    //    → reuse already-resolved value (no re-execution)
+                                    // 3. Interactive GUI prompt with enter + confirm
+                                    //
+                                    // We only reuse the outer `passphrase` when it provably
+                                    // came from a configured source. If it came from a single
+                                    // interactive password_box (no confirmation), we must NOT
+                                    // reuse it — init needs enter+confirm to avoid typos.
+                                    // Note: VYKAR_PASSPHRASE env var is not checked here
+                                    // because take_env_passphrase() removes it on first read,
+                                    // making the probe unreliable in a GUI context.
+                                    let has_configured_source =
+                                        repo.config.encryption.passphrase.is_some()
+                                            || repo.config.encryption.passcommand.is_some();
+                                    let init_pass: Option<zeroize::Zeroizing<String>> =
+                                        if repo.config.encryption.mode
+                                            == vykar_core::config::EncryptionModeConfig::None
+                                        {
+                                            None
+                                        } else if has_configured_source && passphrase.is_some() {
+                                            passphrase.clone()
+                                        } else {
+                                            let title = format!(
+                                                "{APP_TITLE} — New Passphrase ({repo_name})"
+                                            );
+                                            let p1 = tinyfiledialogs::password_box(
+                                                &title,
+                                                "Enter new passphrase:",
+                                            );
+                                            match p1.filter(|v| !v.is_empty()) {
+                                                None => {
+                                                    send_log(
+                                                        &ui_tx,
+                                                        format!(
+                                                            "[{repo_name}] Init cancelled \
+                                                             (no passphrase)."
+                                                        ),
+                                                    );
+                                                    continue;
+                                                }
+                                                Some(p1_val) => {
+                                                    let p2 = tinyfiledialogs::password_box(
+                                                        &format!(
+                                                            "{APP_TITLE} — Confirm Passphrase \
+                                                             ({repo_name})"
+                                                        ),
+                                                        "Confirm passphrase:",
+                                                    );
+                                                    match p2 {
+                                                        Some(ref p2_val) if p2_val == &p1_val => {
+                                                            Some(zeroize::Zeroizing::new(p1_val))
+                                                        }
+                                                        _ => {
+                                                            send_log(
+                                                                &ui_tx,
+                                                                format!(
+                                                                    "[{repo_name}] Passphrases \
+                                                                     do not match."
+                                                                ),
+                                                            );
+                                                            continue;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        };
+
+                                    let retry_pass = init_pass.clone();
+                                    match init::run(
+                                        &repo.config,
+                                        init_pass.as_deref().map(|s| s.as_str()),
+                                    ) {
+                                        Ok(_) => {
+                                            send_log(
+                                                &ui_tx,
+                                                format!("[{repo_name}] Repository initialized."),
+                                            );
+                                            if let Some(p) = init_pass {
+                                                passphrases
+                                                    .insert(repo.config.repository.url.clone(), p);
+                                            }
+                                        }
+                                        Err(VykarError::RepoAlreadyExists(_)) => {
+                                            send_log(
+                                                &ui_tx,
+                                                format!(
+                                                    "[{repo_name}] Repository was initialized \
+                                                     concurrently."
+                                                ),
+                                            );
+                                        }
+                                        Err(init_err) => {
+                                            send_log(
+                                                &ui_tx,
+                                                format!("[{repo_name}] init failed: {init_err}"),
+                                            );
+                                            continue;
+                                        }
+                                    }
+
+                                    // Retry info with the init passphrase to populate the repo card
+                                    if let Ok(stats) = vykar_core::commands::info::run(
+                                        &repo.config,
+                                        retry_pass.as_deref().map(|s| s.as_str()),
+                                    ) {
+                                        let last_snapshot = stats
+                                            .last_snapshot_time
+                                            .map(|t| {
+                                                let local: DateTime<Local> =
+                                                    t.with_timezone(&Local);
+                                                local.format("%Y-%m-%d %H:%M:%S").to_string()
+                                            })
+                                            .unwrap_or_else(|| "N/A".to_string());
+                                        items.push(RepoInfoData {
+                                            name: repo_name.clone(),
+                                            url: url.clone(),
+                                            snapshots: stats.snapshot_count.to_string(),
+                                            last_snapshot,
+                                            size: format_bytes(stats.deduplicated_size),
+                                        });
+                                        labels.push(repo_name);
+                                    }
+                                } else {
+                                    send_log(
+                                        &ui_tx,
+                                        format!("[{repo_name}] Repository initialization skipped."),
+                                    );
+                                }
+                            } else {
+                                send_log(&ui_tx, format!("[{repo_name}] info failed: {e}"));
+                            }
                         }
                     }
                 }
