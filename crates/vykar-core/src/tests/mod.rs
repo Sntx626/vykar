@@ -4,6 +4,7 @@ mod chunker;
 mod compact;
 mod delete;
 mod delete_repo;
+mod error_messages;
 mod format;
 mod helpers;
 mod index;

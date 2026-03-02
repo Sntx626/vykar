@@ -14,10 +14,19 @@ pub(crate) fn cache_dir_from_config(config: &VykarConfig) -> Option<PathBuf> {
     config.cache_dir.as_deref().map(PathBuf::from)
 }
 
+/// Replace the inner detail of a `RepoNotFound` error with the actual repo URL.
+pub(crate) fn enrich_repo_not_found(err: VykarError, url: &str) -> VykarError {
+    match err {
+        VykarError::RepoNotFound(_) => VykarError::RepoNotFound(url.to_string()),
+        other => other,
+    }
+}
+
 /// Open a repository from config using the standard backend resolver.
 pub fn open_repo(config: &VykarConfig, passphrase: Option<&str>) -> Result<Repository> {
     let backend = storage::backend_from_config(&config.repository)?;
     Repository::open(backend, passphrase, cache_dir_from_config(config))
+        .map_err(|e| enrich_repo_not_found(e, &config.repository.url))
 }
 
 /// Open a repository without loading the chunk index.
@@ -28,6 +37,7 @@ pub fn open_repo_without_index(
 ) -> Result<Repository> {
     let backend = storage::backend_from_config(&config.repository)?;
     Repository::open_without_index(backend, passphrase, cache_dir_from_config(config))
+        .map_err(|e| enrich_repo_not_found(e, &config.repository.url))
 }
 
 /// Open a repository without loading the chunk index or file cache.
@@ -38,6 +48,7 @@ pub fn open_repo_without_index_or_cache(
 ) -> Result<Repository> {
     let backend = storage::backend_from_config(&config.repository)?;
     Repository::open_without_index_or_cache(backend, passphrase, cache_dir_from_config(config))
+        .map_err(|e| enrich_repo_not_found(e, &config.repository.url))
 }
 
 /// Open a repository and execute a mutation while holding an advisory lock.

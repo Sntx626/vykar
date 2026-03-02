@@ -227,6 +227,7 @@ pub fn run_with_progress(
     ) {
         Ok(r) => r,
         Err(e) => {
+            let e = super::util::enrich_repo_not_found(e, &config.repository.url);
             // Create a fresh backend just for deregistration (the original was consumed by open).
             if let Ok(cleanup_backend) = storage::backend_from_config(&config.repository) {
                 lock::deregister_session(cleanup_backend.as_ref(), &session_id);
