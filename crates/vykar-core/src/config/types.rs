@@ -131,6 +131,8 @@ pub struct RepositoryConfig {
     pub sftp_known_hosts: Option<String>,
     /// Maximum concurrent SFTP connections (default: 4, clamped to 1..=32).
     pub sftp_max_connections: Option<usize>,
+    /// Per-request SFTP timeout in seconds (default: 30).
+    pub sftp_timeout: Option<u64>,
     /// Bearer token for server backend authentication.
     pub access_token: Option<String>,
     /// Allow plaintext HTTP transport for remote endpoints (unsafe; defaults to false).

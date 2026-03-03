@@ -42,6 +42,7 @@ fn make_test_config(repo_dir: &Path) -> VykarConfig {
             sftp_key: None,
             sftp_known_hosts: None,
             sftp_max_connections: None,
+            sftp_timeout: None,
             access_token: None,
             allow_insecure_http: false,
             min_pack_size: 32 * 1024 * 1024,

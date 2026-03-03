@@ -33,6 +33,8 @@ pub struct RepositoryEntry {
     pub sftp_known_hosts: Option<String>,
     #[serde(default)]
     pub sftp_max_connections: Option<usize>,
+    #[serde(default)]
+    pub sftp_timeout: Option<u64>,
     #[serde(
         default,
         deserialize_with = "deserialize_optional_strict_string",
@@ -74,6 +76,7 @@ impl RepositoryEntry {
             sftp_key: self.sftp_key.clone(),
             sftp_known_hosts: self.sftp_known_hosts.clone(),
             sftp_max_connections: self.sftp_max_connections,
+            sftp_timeout: self.sftp_timeout,
             access_token: self.access_token.clone(),
             allow_insecure_http: self.allow_insecure_http,
             min_pack_size: self.min_pack_size.unwrap_or_else(default_min_pack_size),
@@ -878,6 +881,7 @@ repositories:
     sftp_key: /tmp/id_ed25519
     sftp_known_hosts: /tmp/known_hosts
     sftp_max_connections: 8
+    sftp_timeout: 60
 sources:
   - /home/user
 "#;
@@ -902,6 +906,11 @@ sources:
             repo.sftp_max_connections,
             Some(8),
             "sftp_max_connections should be parsed"
+        );
+        assert_eq!(
+            repo.sftp_timeout,
+            Some(60),
+            "sftp_timeout should be parsed"
         );
     }
 
@@ -1190,6 +1199,7 @@ repositories:
                     sftp_key: None,
                     sftp_known_hosts: None,
                     sftp_max_connections: None,
+                    sftp_timeout: None,
                     access_token: None,
                     allow_insecure_http: false,
                     min_pack_size: default_min_pack_size(),

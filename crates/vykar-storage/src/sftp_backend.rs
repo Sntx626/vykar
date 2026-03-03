@@ -32,6 +32,22 @@ const MAX_SFTP_MAX_CONNECTIONS: usize = 32;
 /// Safety cap for one `get_range` request.
 const MAX_GET_RANGE_BYTES: u64 = 1024 * 1024 * 1024;
 
+/// Default per-request SFTP timeout in seconds.
+/// Generous enough for slow/congested links, but still detects dead connections.
+const DEFAULT_SFTP_TIMEOUT_SECS: u64 = 30;
+
+/// Minimum per-request SFTP timeout in seconds.
+/// Prevents accidental zero/near-zero values that would cause immediate timeouts.
+const MIN_SFTP_TIMEOUT_SECS: u64 = 5;
+
+/// Maximum per-request SFTP timeout in seconds (5 minutes).
+/// Prevents a single stuck request from blocking retries for an unreasonable time.
+const MAX_SFTP_TIMEOUT_SECS: u64 = 300;
+
+/// SSH keepalive interval. Detects dead connections within ~90s (30s × max 3)
+/// and keeps NAT mappings alive.
+const DEFAULT_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
+
 /// Parameters needed to (re-)establish an SFTP connection.
 #[derive(Clone)]
 struct SftpConnectParams {
@@ -41,6 +57,7 @@ struct SftpConnectParams {
     key_path: Option<PathBuf>,
     root: String,
     known_hosts_path: PathBuf,
+    sftp_timeout_secs: u64,
 }
 
 /// SSH client handler that enforces known-host checks (TOFU).
@@ -195,6 +212,7 @@ impl SftpBackend {
         key_path: Option<&str>,
         known_hosts_path: Option<&str>,
         max_connections: Option<usize>,
+        sftp_timeout_secs: Option<u64>,
         retry: RetryConfig,
     ) -> Result<Self> {
         let user = user
@@ -214,6 +232,18 @@ impl SftpBackend {
             }
         }
 
+        let effective_timeout = normalize_sftp_timeout(sftp_timeout_secs);
+        if let Some(requested) = sftp_timeout_secs {
+            if requested != effective_timeout {
+                tracing::warn!(
+                    requested,
+                    effective = effective_timeout,
+                    "adjusted sftp_timeout to supported range"
+                );
+            }
+        }
+        tracing::debug!(sftp_timeout_secs = effective_timeout, "SFTP session timeout");
+
         Ok(Self {
             params: SftpConnectParams {
                 host: host.to_string(),
@@ -222,6 +252,7 @@ impl SftpBackend {
                 key_path: key_path.map(expand_tilde_path),
                 root: normalize_root(root),
                 known_hosts_path,
+                sftp_timeout_secs: effective_timeout,
             },
             pool: Mutex::new(ConnPoolState::default()),
             pool_ready: Condvar::new(),
@@ -304,6 +335,8 @@ impl SftpBackend {
     async fn connect(params: &SftpConnectParams) -> RetryResult<SftpConn> {
         let config = Arc::new(client::Config {
             inactivity_timeout: Some(INACTIVITY_TIMEOUT),
+            keepalive_interval: Some(DEFAULT_KEEPALIVE_INTERVAL),
+            nodelay: true,
             ..Default::default()
         });
         let handler = SshHandler {
@@ -358,13 +391,15 @@ impl SftpBackend {
             .request_subsystem(true, "sftp")
             .await
             .map_err(|e| ssh_retry_error("request sftp subsystem", &params.host, params.port, e))?;
-        let sftp = SftpSession::new(channel.into_stream()).await.map_err(|e| {
-            sftp_retry_error(
-                "session init",
-                &format!("{}:{}", params.host, params.port),
-                e,
-            )
-        })?;
+        let sftp = SftpSession::new_opts(channel.into_stream(), Some(params.sftp_timeout_secs))
+            .await
+            .map_err(|e| {
+                sftp_retry_error(
+                    "session init",
+                    &format!("{}:{}", params.host, params.port),
+                    e,
+                )
+            })?;
 
         Ok(SftpConn {
             sftp,
@@ -445,6 +480,12 @@ fn normalize_max_connections(requested: Option<usize>) -> usize {
     requested
         .unwrap_or(DEFAULT_SFTP_MAX_CONNECTIONS)
         .clamp(1, MAX_SFTP_MAX_CONNECTIONS)
+}
+
+fn normalize_sftp_timeout(requested: Option<u64>) -> u64 {
+    requested
+        .unwrap_or(DEFAULT_SFTP_TIMEOUT_SECS)
+        .clamp(MIN_SFTP_TIMEOUT_SECS, MAX_SFTP_TIMEOUT_SECS)
 }
 
 fn join_root_key(root: &str, key: &str) -> String {
@@ -614,6 +655,10 @@ fn io_retry_error(op: &str, path: &str, e: std::io::Error) -> RetryError {
             | std::io::ErrorKind::ConnectionReset
             | std::io::ErrorKind::NotConnected
             | std::io::ErrorKind::BrokenPipe
+            // russh-sftp AsyncWrite/AsyncRead wraps all SFTP errors as
+            // ErrorKind::Other, losing the original error type. Default
+            // to retryable — the channel is likely broken anyway.
+            | std::io::ErrorKind::Other
     );
 
     let err = VykarError::Other(format!("SFTP {op} '{path}': {e}"));
@@ -947,5 +992,30 @@ mod tests {
         assert!(validate_range_length(1024).is_ok());
         assert!(validate_range_length(MAX_GET_RANGE_BYTES).is_ok());
         assert!(validate_range_length(MAX_GET_RANGE_BYTES + 1).is_err());
+    }
+
+    #[test]
+    fn test_normalize_sftp_timeout() {
+        assert_eq!(normalize_sftp_timeout(None), DEFAULT_SFTP_TIMEOUT_SECS);
+        assert_eq!(normalize_sftp_timeout(Some(0)), MIN_SFTP_TIMEOUT_SECS);
+        assert_eq!(normalize_sftp_timeout(Some(1)), MIN_SFTP_TIMEOUT_SECS);
+        assert_eq!(normalize_sftp_timeout(Some(60)), 60);
+        assert_eq!(normalize_sftp_timeout(Some(300)), MAX_SFTP_TIMEOUT_SECS);
+        assert_eq!(normalize_sftp_timeout(Some(9999)), MAX_SFTP_TIMEOUT_SECS);
+    }
+
+    #[test]
+    fn test_io_retry_error_other_is_retryable() {
+        // russh-sftp wraps all SFTP errors as ErrorKind::Other
+        let err = std::io::Error::new(std::io::ErrorKind::Other, "Timeout");
+        let retry = io_retry_error("write", "/test/path", err);
+        assert!(retry.retryable, "ErrorKind::Other should be retryable");
+    }
+
+    #[test]
+    fn test_io_retry_error_permission_denied_is_not_retryable() {
+        let err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
+        let retry = io_retry_error("write", "/test/path", err);
+        assert!(!retry.retryable, "PermissionDenied should not be retryable");
     }
 }

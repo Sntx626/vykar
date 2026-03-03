@@ -361,6 +361,7 @@ pub struct StorageConfig {
     pub sftp_key: Option<String>,
     pub sftp_known_hosts: Option<String>,
     pub sftp_max_connections: Option<usize>,
+    pub sftp_timeout: Option<u64>,
     pub access_token: Option<String>,
     pub allow_insecure_http: bool,
     pub retry: RetryConfig,
@@ -454,6 +455,7 @@ pub fn backend_from_config(cfg: &StorageConfig) -> Result<Box<dyn StorageBackend
             cfg.sftp_key.as_deref(),
             cfg.sftp_known_hosts.as_deref(),
             cfg.sftp_max_connections,
+            cfg.sftp_timeout,
             cfg.retry.clone(),
         )?)),
         #[cfg(not(feature = "backend-sftp"))]
@@ -688,6 +690,7 @@ mod tests {
             sftp_key: None,
             sftp_known_hosts: None,
             sftp_max_connections: None,
+            sftp_timeout: None,
             access_token: None,
             allow_insecure_http: false,
             retry: RetryConfig::default(),
