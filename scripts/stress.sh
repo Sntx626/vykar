@@ -17,7 +17,7 @@ Options:
   --iterations N         Loop count (default: 1000)
   --check-every N        Run 'check' every N iterations; 0 disables (default: 50)
   --verify-data-every N  Run 'check --verify-data' every N iters; 0 disables (default: 0)
-  --backend NAME         Storage backend: local|rest|s3 (default: local)
+  --backend NAME         Storage backend: local|rest|s3|sftp (default: local)
   --drop-caches          Drop OS file caches before backup and restore
   --time-v               Capture /usr/bin/time -v per vykar step into logs/*.timev
   --help                 Show help
@@ -26,6 +26,8 @@ Environment overrides (via env vars or scripts/lib/defaults.sh):
   CORPUS_LOCAL, REPO_URL, REST_URL, REST_TOKEN, VYKAR_REST_TOKEN, VYKAR_TOKEN,
   REST_DATA_DIR, ALLOW_INSECURE_HTTP,
   S3_REGION, S3_ACCESS_KEY, S3_SECRET_KEY,
+  SFTP_HOST, SFTP_PORT, SFTP_USER, SFTP_BASE_DIR,
+  SFTP_KEY, SFTP_KNOWN_HOSTS, SFTP_MAX_CONNECTIONS,
   MINIO_SERVICE, MINIO_DATA_DIR, MINIO_HEALTH_URL, STRESS_ROOT
 USAGE
 }
@@ -55,7 +57,7 @@ done
 [[ "$ITERATIONS" =~ ^[0-9]+$ ]] || die "--iterations must be a non-negative integer"
 [[ "$CHECK_EVERY" =~ ^[0-9]+$ ]] || die "--check-every must be a non-negative integer"
 [[ "$VERIFY_DATA_EVERY" =~ ^[0-9]+$ ]] || die "--verify-data-every must be a non-negative integer"
-[[ "$BACKEND" =~ ^(local|rest|s3)$ ]] || die "--backend must be one of: local, rest, s3"
+[[ "$BACKEND" =~ ^(local|rest|s3|sftp)$ ]] || die "--backend must be one of: local, rest, s3, sftp"
 
 VYKAR_BIN="$(command -v vykar || true)"
 [[ -n "$VYKAR_BIN" ]] || die "vykar binary not found on PATH"
@@ -88,6 +90,7 @@ resolve_repo_url() {
     local) REPO_URL_RESOLVED="$REPO_DIR" ;;
     rest)  REPO_URL_RESOLVED="$REST_URL" ;;
     s3)    REPO_URL_RESOLVED="s3+http://127.0.0.1:9000/vykar-stress/$REPO_LABEL" ;;
+    sftp)  REPO_URL_RESOLVED="sftp://${SFTP_USER}@${SFTP_HOST}:${SFTP_PORT}${SFTP_BASE_DIR%/}/$REPO_LABEL" ;;
   esac
 }
 
@@ -296,7 +299,7 @@ main() {
       maybe_drop_caches
     fi
 
-    if [[ "$BACKEND" == "rest" || "$BACKEND" == "s3" ]]; then
+    if [[ "$BACKEND" == "rest" || "$BACKEND" == "s3" || "$BACKEND" == "sftp" ]]; then
       log "[$i/$ITERATIONS] break-lock"
       CURRENT_STEP="break-lock"
       LAST_LOGS[break_lock]="$(run_vykar "$i" break-lock break-lock -R "$REPO_LABEL")"

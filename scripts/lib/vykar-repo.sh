@@ -91,6 +91,24 @@ CFG
 CFG
   fi
 
+  if [[ "$backend" == "sftp" ]]; then
+    if [[ -n "${SFTP_KEY:-}" ]]; then
+      cat >>"$out" <<CFG
+    sftp_key: "$(yaml_escape "$SFTP_KEY")"
+CFG
+    fi
+    if [[ -n "${SFTP_KNOWN_HOSTS:-}" ]]; then
+      cat >>"$out" <<CFG
+    sftp_known_hosts: "$(yaml_escape "$SFTP_KNOWN_HOSTS")"
+CFG
+    fi
+    if [[ -n "${SFTP_MAX_CONNECTIONS:-}" ]]; then
+      cat >>"$out" <<CFG
+    sftp_max_connections: ${SFTP_MAX_CONNECTIONS}
+CFG
+    fi
+  fi
+
   cat >>"$out" <<CFG
 encryption:
   mode: auto

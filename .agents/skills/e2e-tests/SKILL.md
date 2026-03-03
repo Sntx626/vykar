@@ -45,6 +45,7 @@ Run each sub-skill to execute a specific test area. Results go to `~/runtime/`.
 ### Filesystems — Snapshot hooks patterns
 - **`e2e-tests:filesystems:btrfs`** — Btrfs read-only subvolume snapshot hooks
 - **`e2e-tests:filesystems:zfs`** — ZFS dataset snapshot hooks via .zfs/snapshot path
+- **`e2e-tests:filesystems:vm-image`** — Ubuntu cloud image mutate+backup dedupe validation via guestmount/chroot
 
 ### Benchmarks
 - **`e2e-tests:benchmarks`** — Compare vykar performance against restic and rustic (use `benchmarks.md` + bundled scripts under `scripts/`)
@@ -55,7 +56,7 @@ Run each sub-skill to execute a specific test area. Results go to `~/runtime/`.
 1. **Backends** first (establishes corpus validation baseline)
 2. **Databases** (large-data, container-based tests)
 3. **Containers** (reuses DB patterns with volume workflows)
-4. **Filesystems** (requires disk/partition setup)
+4. **Filesystems** (requires disk/partition setup; run VM image dedupe scenario here)
 5. **Stress** next (long-loop correctness/locking pressure on local backend)
 6. **Benchmarks** last (long-running, independent)
 
@@ -79,6 +80,15 @@ export VYKAR_PASSPHRASE=123    # non-interactive passphrase
   - `scripts/mariadb-generate-random-data.sh --container <name> --target-gib 10`
   - `scripts/mongodb-generate-random-data.sh --container <name> --target-gib 2.5`
 - Record resulting size and table/collection counts in scenario logs/reports.
+
+### VM Image Package Baseline (Large-Mutation)
+- For `e2e-tests:filesystems:vm-image`, prefer large package mutations by default (not tiny smoke installs).
+- Ubuntu desktop-class package to use: `ubuntu-desktop-minimal` (primary).
+- Optional heavier variant when disk space allows: `ubuntu-desktop`.
+- Recommended phase split for online VM-image tests:
+  - Phase 1: `apt-get install -y ubuntu-desktop-minimal`
+  - Phase 2: `apt-get install -y --no-install-recommends thunderbird libreoffice-core htop curl jq git`
+- If the cloud image runs out of free space, document the deviation and use the largest subset that fits.
 
 ### Config Strategy
 1. Copy `~/vykar.sample.yaml` to a scenario-specific config (e.g., `config.postgres.yaml`)
@@ -149,6 +159,8 @@ Each sub-skill should produce:
 - For high-entropy MongoDB seed data, use `scripts/mongodb-generate-random-data.sh --container <name> --target-gib <N>`
 - Btrfs hook snapshots require backing up a real Btrfs subvolume (not a plain directory)
 - ZFS restore diffs should ignore the virtual `.zfs` directory
+- guestmount/chroot image workflows need bind mounts for `/dev`, `/proc`, `/sys`, and `/run` before apt operations
+- For Ubuntu VM-image scenarios, use `ubuntu-desktop-minimal` as the default large package mutation target
 - MongoDB host tools may be missing — use `docker exec` or `podman exec` as fallback
 - Pre-pull container images before timed runs to avoid skewing measurements
 - Sample config repo paths may need adjustment for the sandbox — verify and update before first run

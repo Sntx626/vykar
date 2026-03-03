@@ -57,7 +57,7 @@ done
 [[ -n "$CONTAINER" ]] || die "--container is required"
 [[ "$CONTAINER" =~ ^[a-zA-Z0-9_.-]+$ ]] || die "invalid --container"
 [[ "$DB_NAME" =~ ^[a-zA-Z0-9_]+$ ]] || die "invalid --db"
-[[ "$TARGET_GIB" =~ ^[0-9]+$ ]] || die "--target-gib must be a non-negative integer"
+[[ "$TARGET_GIB" =~ ^[0-9]+([.][0-9]+)?$ ]] || die "--target-gib must be a non-negative number"
 [[ "$BATCH_SIZE" =~ ^[0-9]+$ && "$BATCH_SIZE" -gt 0 ]] || die "--batch-size must be > 0"
 [[ "$PAYLOAD_BYTES" =~ ^[0-9]+$ && "$PAYLOAD_BYTES" -gt 0 ]] || die "--payload-bytes must be > 0"
 [[ "$MAX_BATCHES" =~ ^[0-9]+$ && "$MAX_BATCHES" -gt 0 ]] || die "--max-batches must be > 0"
@@ -66,7 +66,7 @@ done
 need docker
 need mktemp
 
-TARGET_BYTES=$((TARGET_GIB * 1024 * 1024 * 1024))
+TARGET_BYTES="$(awk -v gib="$TARGET_GIB" 'BEGIN { printf "%.0f", gib * 1024 * 1024 * 1024 }')"
 
 mongo_eval() {
   local expr="$1"
