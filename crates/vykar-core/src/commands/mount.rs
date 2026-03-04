@@ -707,7 +707,11 @@ pub fn run(
                 items.len(),
                 entry.name
             );
-            root_children.insert(entry.name.clone(), build_vfs_tree(&items));
+            let mut snap_tree = build_vfs_tree(&items);
+            if let VfsNode::Dir { ref mut meta, .. } = snap_tree {
+                meta.mtime = SystemTime::from(entry.time);
+            }
+            root_children.insert(entry.name.clone(), snap_tree);
         }
         VfsNode::Dir {
             children: root_children,
