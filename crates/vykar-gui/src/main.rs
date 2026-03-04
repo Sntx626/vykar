@@ -1560,7 +1560,7 @@ fn apply_config(
         state.next_run = Some(Instant::now() + interval);
     }
 
-    let canonical = std::fs::canonicalize(&config_path).unwrap_or_else(|_| config_path.clone());
+    let canonical = dunce::canonicalize(&config_path).unwrap_or_else(|_| config_path.clone());
     *config_display_path = canonical.clone();
 
     let _ = ui_tx.send(UiEvent::ConfigInfo {
@@ -1597,7 +1597,7 @@ fn run_worker(
 ) {
     let mut passphrases: HashMap<String, zeroize::Zeroizing<String>> = HashMap::new();
 
-    let mut config_display_path = std::fs::canonicalize(runtime.source.path())
+    let mut config_display_path = dunce::canonicalize(runtime.source.path())
         .unwrap_or_else(|_| runtime.source.path().to_path_buf());
 
     let schedule = runtime.schedule();
@@ -2516,7 +2516,7 @@ fn run_worker(
                 let _ = std::process::Command::new("open").arg(&path).spawn();
             }
             AppCommand::ReloadConfig => {
-                let config_path = std::fs::canonicalize(runtime.source.path())
+                let config_path = dunce::canonicalize(runtime.source.path())
                     .unwrap_or_else(|_| runtime.source.path().to_path_buf());
                 apply_config(
                     config_path,
@@ -2780,7 +2780,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let runtime = resolve_or_create_config(gui_state.config_path.as_deref())?;
 
     // Track the active config path so we can persist it on quit.
-    let active_config_path = Arc::new(Mutex::new(runtime.source.path().display().to_string()));
+    let active_config_path = Arc::new(Mutex::new(
+        dunce::canonicalize(runtime.source.path())
+            .unwrap_or_else(|_| runtime.source.path().to_path_buf())
+            .display()
+            .to_string(),
+    ));
     // Last captured GUI state — updated on every window hide so we have a valid
     // snapshot even if the window is already destroyed when the process exits.
     let last_gui_state: Arc<Mutex<Option<state::GuiState>>> = Arc::new(Mutex::new(None));
