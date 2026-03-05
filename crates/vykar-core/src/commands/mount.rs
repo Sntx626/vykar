@@ -668,6 +668,15 @@ impl DavFile for VykarDavFile {
 
 // ─── Public API ────────────────────────────────────────────────────────────
 
+/// Progress events emitted by the mount command.
+#[derive(Debug)]
+pub enum MountProgressEvent {
+    LoadingSnapshots,
+    SnapshotLoaded { name: String, item_count: usize },
+    Serving { address: String },
+    ShuttingDown,
+}
+
 /// Start a read-only WebDAV server exposing snapshot contents.
 ///
 /// If `snapshot_name` is given, serves that single snapshot at the root.
@@ -680,13 +689,40 @@ pub fn run(
     cache_size: usize,
     source_filter: &[String],
 ) -> Result<()> {
+    run_with_progress(
+        config,
+        passphrase,
+        snapshot_name,
+        address,
+        cache_size,
+        source_filter,
+        None,
+    )
+}
+
+pub fn run_with_progress(
+    config: &VykarConfig,
+    passphrase: Option<&str>,
+    snapshot_name: Option<&str>,
+    address: &str,
+    cache_size: usize,
+    source_filter: &[String],
+    mut progress: Option<&mut dyn FnMut(MountProgressEvent)>,
+) -> Result<()> {
     let mut repo = open_repo(config, passphrase)?;
 
     // Build the VFS tree from snapshot items
-    eprintln!("Loading snapshot data...");
+    if let Some(ref mut cb) = progress {
+        cb(MountProgressEvent::LoadingSnapshots);
+    }
     let tree = if let Some(name) = snapshot_name {
         let items = list_cmd::load_snapshot_items(&mut repo, name)?;
-        eprintln!("Loaded {} items from snapshot '{name}'", items.len());
+        if let Some(ref mut cb) = progress {
+            cb(MountProgressEvent::SnapshotLoaded {
+                name: name.to_string(),
+                item_count: items.len(),
+            });
+        }
         build_vfs_tree(&items)
     } else {
         let mut root_children = HashMap::new();
@@ -702,11 +738,12 @@ pub fn run(
         };
         for entry in &entries {
             let items = list_cmd::load_snapshot_items(&mut repo, &entry.name)?;
-            eprintln!(
-                "Loaded {} items from snapshot '{}'",
-                items.len(),
-                entry.name
-            );
+            if let Some(ref mut cb) = progress {
+                cb(MountProgressEvent::SnapshotLoaded {
+                    name: entry.name.clone(),
+                    item_count: items.len(),
+                });
+            }
             let mut snap_tree = build_vfs_tree(&items);
             if let VfsNode::Dir { ref mut meta, .. } = snap_tree {
                 meta.mtime = SystemTime::from(entry.time);
@@ -738,10 +775,15 @@ pub fn run(
     let rt = tokio::runtime::Runtime::new()
         .map_err(|e| VykarError::Other(format!("failed to create tokio runtime: {e}")))?;
 
-    rt.block_on(async { serve(handler, tree, address).await })
+    rt.block_on(async { serve(handler, tree, address, &mut progress).await })
 }
 
-async fn serve(handler: DavHandler, tree: Arc<VfsNode>, address: &str) -> Result<()> {
+async fn serve(
+    handler: DavHandler,
+    tree: Arc<VfsNode>,
+    address: &str,
+    progress: &mut Option<&mut dyn FnMut(MountProgressEvent)>,
+) -> Result<()> {
     let addr: std::net::SocketAddr = address
         .parse()
         .map_err(|e| VykarError::Config(format!("invalid address '{address}': {e}")))?;
@@ -750,10 +792,11 @@ async fn serve(handler: DavHandler, tree: Arc<VfsNode>, address: &str) -> Result
         .await
         .map_err(|e| VykarError::Other(format!("failed to bind to {addr}: {e}")))?;
 
-    eprintln!("Serving on http://{addr}");
-    eprintln!("  Browse in browser:  http://{addr}");
-    eprintln!("  WebDAV (Finder):    Go → Connect to Server → http://{addr}");
-    eprintln!("Press Ctrl+C to stop.");
+    if let Some(cb) = progress.as_deref_mut() {
+        cb(MountProgressEvent::Serving {
+            address: format!("{addr}"),
+        });
+    }
 
     loop {
         tokio::select! {
@@ -806,7 +849,9 @@ async fn serve(handler: DavHandler, tree: Arc<VfsNode>, address: &str) -> Result
                 });
             }
             _ = tokio::signal::ctrl_c() => {
-                eprintln!("\nShutting down.");
+                if let Some(cb) = progress.as_deref_mut() {
+                    cb(MountProgressEvent::ShuttingDown);
+                }
                 break;
             }
         }

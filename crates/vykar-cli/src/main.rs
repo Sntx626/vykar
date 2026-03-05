@@ -10,6 +10,7 @@ mod prompt;
 pub(crate) mod signal;
 mod table;
 
+use std::io::IsTerminal;
 use std::sync::atomic::Ordering;
 
 use clap::Parser;
@@ -42,11 +43,16 @@ fn main() {
         2 => "debug",
         _ => "trace",
     };
-    tracing_subscriber::fmt()
+    let is_tty = std::io::stderr().is_terminal();
+    let builder = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(false)
-        .with_writer(progress::ProgressAwareStderr)
-        .init();
+        .with_writer(progress::ProgressAwareStderr);
+    if is_tty {
+        builder.without_time().init();
+    } else {
+        builder.init();
+    }
 
     // Handle `config` subcommand early — no config file needed
     if let Some(Commands::Config { dest }) = &cli.command {

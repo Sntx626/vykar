@@ -237,13 +237,13 @@ pub fn compact_repo(
     let mut analyses = analyses_mu.into_inner().unwrap();
 
     if stats.packs_corrupt > 0 {
-        warn!(
+        tracing::debug!(
             "{} corrupt pack(s) found; run `vykar check --verify-data` for details",
             stats.packs_corrupt
         );
     }
     if stats.packs_orphan > 0 {
-        info!(
+        tracing::debug!(
             "{} orphan pack(s) found (present on disk but not referenced by index)",
             stats.packs_orphan
         );

@@ -114,27 +114,8 @@ pub(crate) fn run_backup(
                 );
             }
 
-            println!("Snapshot created: {name}");
             let paths_display = expanded.join(", ");
-            println!("  Source: {paths_display} (label: {source_label})");
-            if stats.errors > 0 {
-                println!(
-                    "  Files: {}, Errors: {}, Original: {}, Compressed: {}, Deduplicated: {}",
-                    stats.nfiles,
-                    stats.errors,
-                    format_bytes(stats.original_size),
-                    format_bytes(stats.compressed_size),
-                    format_bytes(stats.deduplicated_size),
-                );
-            } else {
-                println!(
-                    "  Files: {}, Original: {}, Compressed: {}, Deduplicated: {}",
-                    stats.nfiles,
-                    format_bytes(stats.original_size),
-                    format_bytes(stats.compressed_size),
-                    format_bytes(stats.deduplicated_size),
-                );
-            }
+            print_backup_summary(&name, &paths_display, &source_label, stats);
         } else if sources.is_empty() {
             return Err("no sources configured and no paths specified".into());
         } else {
@@ -184,27 +165,8 @@ pub(crate) fn run_backup(
                         );
                     }
 
-                    println!("Snapshot created: {name}");
                     let paths_display = source.paths.join(", ");
-                    println!("  Source: {paths_display} (label: {})", source.label);
-                    if stats.errors > 0 {
-                        println!(
-                            "  Files: {}, Errors: {}, Original: {}, Compressed: {}, Deduplicated: {}",
-                            stats.nfiles,
-                            stats.errors,
-                            format_bytes(stats.original_size),
-                            format_bytes(stats.compressed_size),
-                            format_bytes(stats.deduplicated_size),
-                        );
-                    } else {
-                        println!(
-                            "  Files: {}, Original: {}, Compressed: {}, Deduplicated: {}",
-                            stats.nfiles,
-                            format_bytes(stats.original_size),
-                            format_bytes(stats.compressed_size),
-                            format_bytes(stats.deduplicated_size),
-                        );
-                    }
+                    print_backup_summary(&name, &paths_display, &source.label, stats);
                     Ok(())
                 };
 
@@ -226,4 +188,32 @@ pub(crate) fn run_backup(
 
         Ok(had_partial)
     })
+}
+
+fn print_backup_summary(
+    name: &str,
+    paths_display: &str,
+    label: &str,
+    stats: &vykar_core::snapshot::SnapshotStats,
+) {
+    println!("Snapshot created: {name}");
+    println!("  Source: {paths_display} (label: {label})");
+    if stats.errors > 0 {
+        println!(
+            "  Files: {}, Errors: {}, Original: {}, Compressed: {}, Deduplicated: {}",
+            stats.nfiles,
+            stats.errors,
+            format_bytes(stats.original_size),
+            format_bytes(stats.compressed_size),
+            format_bytes(stats.deduplicated_size),
+        );
+    } else {
+        println!(
+            "  Files: {}, Original: {}, Compressed: {}, Deduplicated: {}",
+            stats.nfiles,
+            format_bytes(stats.original_size),
+            format_bytes(stats.compressed_size),
+            format_bytes(stats.deduplicated_size),
+        );
+    }
 }

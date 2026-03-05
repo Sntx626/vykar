@@ -149,6 +149,14 @@ The type tag byte is used as AAD (authenticated additional data) in AES-GCM.
 - **Index-first persistence**: in `commit_concurrent_session()`, the index is always written before the manifest. Crash between the two leaves harmless orphan index entries.
 - **Maintenance lock**: `with_maintenance_lock()` (compact/delete/prune) acquires the advisory lock, cleans stale sessions (72 h), then refuses to proceed if any active sessions remain (`VykarError::ActiveSessions`).
 
+### Output conventions
+
+- **stdout (`println!`)**: Command results, statistics, tables. Only in `vykar-cli`. Pipe-safe.
+- **stderr (`eprintln!`)**: User-facing status, errors, warnings, prompts, progress. Only in `vykar-cli`.
+- **tracing macros**: Internal diagnostics in library crates. No timestamps when stderr is a TTY; full timestamps otherwise.
+- **Progress callbacks**: Core commands needing real-time status use `run_with_progress()` with `Option<&mut dyn FnMut(Event)>`.
+- **No print statements in vykar-core**: Core communicates results via return values and status via callbacks.
+
 ## Dependencies (key ones)
 
 | Purpose | Crate |

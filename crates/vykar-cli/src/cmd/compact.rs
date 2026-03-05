@@ -41,13 +41,13 @@ pub(crate) fn run_compact(
     }
 
     if stats.packs_corrupt > 0 {
-        println!(
+        eprintln!(
             "  Warning: {} corrupt pack(s) found; run `vykar check --verify-data` for details",
             stats.packs_corrupt,
         );
     }
     if stats.packs_orphan > 0 {
-        println!(
+        eprintln!(
             "  {} orphan pack(s) (present on disk but not in index)",
             stats.packs_orphan,
         );
