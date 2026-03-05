@@ -84,11 +84,10 @@ impl Default for XattrsConfig {
 pub struct ScheduleConfig {
     #[serde(default)]
     pub enabled: bool,
-    #[serde(
-        default = "default_schedule_every",
-        deserialize_with = "deserialize_duration_string"
-    )]
-    pub every: String,
+    #[serde(default, deserialize_with = "deserialize_optional_duration_string")]
+    pub every: Option<String>,
+    #[serde(default)]
+    pub cron: Option<String>,
     #[serde(default)]
     pub on_startup: bool,
     #[serde(default)]
@@ -101,7 +100,8 @@ impl Default for ScheduleConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            every: default_schedule_every(),
+            every: None,
+            cron: None,
             on_startup: false,
             jitter_seconds: 0,
             passphrase_prompt_timeout_seconds: default_passphrase_prompt_timeout_seconds(),
@@ -111,7 +111,38 @@ impl Default for ScheduleConfig {
 
 impl ScheduleConfig {
     pub fn every_duration(&self) -> vykar_types::error::Result<Duration> {
-        super::defaults::parse_human_duration(&self.every)
+        let raw = self.every.as_deref().unwrap_or("24h");
+        super::defaults::parse_human_duration(raw)
+    }
+
+    pub fn is_cron(&self) -> bool {
+        self.cron.is_some()
+    }
+
+    pub fn validate(&self) -> vykar_types::error::Result<()> {
+        use vykar_types::error::VykarError;
+
+        if self.every.is_some() && self.cron.is_some() {
+            return Err(VykarError::Config(
+                "schedule: 'every' and 'cron' are mutually exclusive".into(),
+            ));
+        }
+
+        if let Some(ref expr) = self.cron {
+            use croner::Cron;
+            expr.parse::<Cron>().map_err(|e| {
+                VykarError::Config(format!("schedule.cron: invalid expression '{expr}': {e}"))
+            })?;
+            // Reject 6-field (with seconds) and 7-field expressions
+            let field_count = expr.split_whitespace().count();
+            if field_count != 5 {
+                return Err(VykarError::Config(format!(
+                    "schedule.cron: expected 5 fields (minute hour dom month dow), got {field_count}"
+                )));
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -304,3 +335,63 @@ impl CompactConfig {
 
 // RetryConfig is defined in vykar-storage; re-exported here for ergonomic config construction.
 pub use vykar_storage::RetryConfig;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn schedule(every: Option<&str>, cron: Option<&str>) -> ScheduleConfig {
+        ScheduleConfig {
+            every: every.map(String::from),
+            cron: cron.map(String::from),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn validate_accepts_every_only() {
+        assert!(schedule(Some("6h"), None).validate().is_ok());
+    }
+
+    #[test]
+    fn validate_accepts_cron_only() {
+        assert!(schedule(None, Some("0 3 * * *")).validate().is_ok());
+    }
+
+    #[test]
+    fn validate_accepts_neither() {
+        assert!(schedule(None, None).validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_both_every_and_cron() {
+        let err = schedule(Some("6h"), Some("0 3 * * *"))
+            .validate()
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("mutually exclusive"), "got: {msg}");
+    }
+
+    #[test]
+    fn validate_rejects_invalid_cron() {
+        let err = schedule(None, Some("bad")).validate().unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("invalid expression"), "got: {msg}");
+    }
+
+    #[test]
+    fn validate_rejects_six_field_cron() {
+        let err = schedule(None, Some("0 0 3 * * *")).validate().unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("expected 5 fields"), "got: {msg}");
+    }
+
+    #[test]
+    fn validate_rejects_seven_field_cron() {
+        let err = schedule(None, Some("0 0 3 * * * 2025"))
+            .validate()
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("expected 5 fields"), "got: {msg}");
+    }
+}

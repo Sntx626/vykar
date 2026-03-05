@@ -18,8 +18,6 @@ pub(crate) fn run_daemon(
         );
     }
 
-    let interval = scheduler::schedule_interval(schedule)?;
-
     // Pre-validate passphrases for encrypted repos
     for repo in repos {
         let label = repo.label.as_deref().unwrap_or(&repo.config.repository.url);
@@ -39,13 +37,24 @@ pub(crate) fn run_daemon(
         }
     }
 
-    tracing::info!(
-        repos = repos.len(),
-        interval = ?interval,
-        on_startup = schedule.on_startup,
-        jitter_seconds = schedule.jitter_seconds,
-        "daemon starting"
-    );
+    if schedule.is_cron() {
+        tracing::info!(
+            repos = repos.len(),
+            cron = schedule.cron.as_deref().unwrap_or(""),
+            on_startup = schedule.on_startup,
+            jitter_seconds = schedule.jitter_seconds,
+            "daemon starting (cron mode)"
+        );
+    } else {
+        let interval = schedule.every_duration()?;
+        tracing::info!(
+            repos = repos.len(),
+            interval = ?interval,
+            on_startup = schedule.on_startup,
+            jitter_seconds = schedule.jitter_seconds,
+            "daemon starting (interval mode)"
+        );
+    }
 
     for repo in repos {
         let name = repo.label.as_deref().unwrap_or(&repo.config.repository.url);
@@ -56,10 +65,9 @@ pub(crate) fn run_daemon(
     let mut next_run = if schedule.on_startup {
         Instant::now()
     } else {
-        let jitter = scheduler::random_jitter(schedule.jitter_seconds);
-        let next = Instant::now() + interval + jitter;
-        log_next_run(interval + jitter);
-        next
+        let delay = scheduler::next_run_delay(schedule)?;
+        log_next_run(delay);
+        Instant::now() + delay
     };
 
     loop {
@@ -77,8 +85,7 @@ pub(crate) fn run_daemon(
             }
 
             // Schedule next run
-            let jitter = scheduler::random_jitter(schedule.jitter_seconds);
-            let delay = interval + jitter;
+            let delay = scheduler::next_run_delay(schedule)?;
             next_run = Instant::now() + delay;
             log_next_run(delay);
         }

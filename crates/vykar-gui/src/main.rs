@@ -1142,6 +1142,7 @@ struct SchedulerState {
     enabled: bool,
     paused: bool,
     every: Duration,
+    cron: Option<String>,
     jitter_seconds: u64,
     next_run: Option<Instant>,
 }
@@ -1152,6 +1153,7 @@ impl Default for SchedulerState {
             enabled: false,
             paused: false,
             every: Duration::from_secs(24 * 60 * 60),
+            cron: None,
             jitter_seconds: 0,
             next_run: None,
         }
@@ -1159,9 +1161,14 @@ impl Default for SchedulerState {
 }
 
 fn schedule_description(schedule: &ScheduleConfig, paused: bool) -> String {
+    let timing = if let Some(ref cron) = schedule.cron {
+        format!("cron={cron}")
+    } else {
+        format!("every={}", schedule.every.as_deref().unwrap_or("24h"))
+    };
     format!(
-        "enabled={}, every={}, on_startup={}, jitter_seconds={}, paused={}",
-        schedule.enabled, schedule.every, schedule.on_startup, schedule.jitter_seconds, paused,
+        "enabled={}, {timing}, on_startup={}, jitter_seconds={}, paused={}",
+        schedule.enabled, schedule.on_startup, schedule.jitter_seconds, paused,
     )
 }
 
@@ -1228,6 +1235,7 @@ fn build_tray_icon() -> Result<
 
 fn spawn_scheduler(
     app_tx: Sender<AppCommand>,
+    ui_tx: Sender<UiEvent>,
     scheduler: Arc<Mutex<SchedulerState>>,
     backup_running: Arc<AtomicBool>,
 ) {
@@ -1247,15 +1255,38 @@ fn spawn_scheduler(
             }
 
             if state.next_run.is_none() {
-                let jitter = vykar_core::app::scheduler::random_jitter(state.jitter_seconds);
-                state.next_run = Some(Instant::now() + state.every + jitter);
+                match compute_scheduler_delay(&state) {
+                    Ok(delay) => state.next_run = Some(Instant::now() + delay),
+                    Err(e) => {
+                        state.paused = true;
+                        state.next_run = None;
+                        let _ = ui_tx.send(UiEvent::LogEntry {
+                            timestamp: Local::now().format("%H:%M:%S").to_string(),
+                            message: format!(
+                                "Scheduler error: {e}. Scheduling paused — reload config to resume."
+                            ),
+                        });
+                        continue;
+                    }
+                }
             }
 
             if let Some(next) = state.next_run {
                 if Instant::now() >= next && !backup_running.load(Ordering::SeqCst) {
                     should_run = true;
-                    let jitter = vykar_core::app::scheduler::random_jitter(state.jitter_seconds);
-                    state.next_run = Some(Instant::now() + state.every + jitter);
+                    match compute_scheduler_delay(&state) {
+                        Ok(delay) => state.next_run = Some(Instant::now() + delay),
+                        Err(e) => {
+                            state.paused = true;
+                            state.next_run = None;
+                            let _ = ui_tx.send(UiEvent::LogEntry {
+                                timestamp: Local::now().format("%H:%M:%S").to_string(),
+                                message: format!(
+                                    "Scheduler error: {e}. Scheduling paused — reload config to resume."
+                                ),
+                            });
+                        }
+                    }
                 }
             }
         }
@@ -1268,6 +1299,24 @@ fn spawn_scheduler(
             break;
         }
     });
+}
+
+fn compute_scheduler_delay(
+    state: &SchedulerState,
+) -> std::result::Result<Duration, vykar_types::error::VykarError> {
+    if let Some(ref cron_expr) = state.cron {
+        let tmp = ScheduleConfig {
+            enabled: true,
+            every: None,
+            cron: Some(cron_expr.clone()),
+            on_startup: false,
+            jitter_seconds: state.jitter_seconds,
+            passphrase_prompt_timeout_seconds: 300,
+        };
+        vykar_core::app::scheduler::next_run_delay(&tmp)
+    } else {
+        Ok(state.every + vykar_core::app::scheduler::random_jitter(state.jitter_seconds))
+    }
 }
 
 // ── Helpers ──
@@ -1505,17 +1554,16 @@ fn log_backup_report(
 }
 
 /// Load and fully validate a config file: parse YAML, check non-empty, validate schedule.
-/// Returns the parsed repos and schedule interval, or a human-readable error string.
-fn validate_config(
-    config_path: &std::path::Path,
-) -> Result<(Vec<config::ResolvedRepo>, Duration), String> {
+/// Returns the parsed repos or a human-readable error string.
+fn validate_config(config_path: &std::path::Path) -> Result<Vec<config::ResolvedRepo>, String> {
     let repos = app::load_runtime_config_from_path(config_path).map_err(|e| format!("{e}"))?;
     if repos.is_empty() {
         return Err("Config is empty (no repositories defined).".into());
     }
-    let interval = vykar_core::app::scheduler::schedule_interval(&repos[0].config.schedule)
-        .map_err(|e| format!("Invalid schedule.every: {e}"))?;
-    Ok((repos, interval))
+    // Validate schedule is usable (parses interval or cron)
+    vykar_core::app::scheduler::next_run_delay(&repos[0].config.schedule)
+        .map_err(|e| format!("Invalid schedule: {e}"))?;
+    Ok(repos)
 }
 
 /// Apply a (possibly new) config file: load, validate, update runtime state, and notify the UI.
@@ -1533,7 +1581,7 @@ fn apply_config(
     ui_tx: &Sender<UiEvent>,
     app_tx: &Sender<AppCommand>,
 ) -> bool {
-    let (repos, interval) = match validate_config(&config_path) {
+    let repos = match validate_config(&config_path) {
         Ok(v) => v,
         Err(msg) => {
             send_log(ui_tx, format!("{msg} Keeping previous config."));
@@ -1555,9 +1603,15 @@ fn apply_config(
     if let Ok(mut state) = scheduler.lock() {
         state.enabled = schedule.enabled;
         state.paused = schedule_paused;
-        state.every = interval;
+        state.every = schedule
+            .every_duration()
+            .unwrap_or(Duration::from_secs(24 * 60 * 60));
+        state.cron = schedule.cron.clone();
         state.jitter_seconds = schedule.jitter_seconds;
-        state.next_run = Some(Instant::now() + interval);
+        // Compute initial next_run via the scheduler delay (includes jitter)
+        let delay = vykar_core::app::scheduler::next_run_delay(&schedule)
+            .unwrap_or(Duration::from_secs(24 * 60 * 60));
+        state.next_run = Some(Instant::now() + delay);
     }
 
     let canonical = dunce::canonicalize(&config_path).unwrap_or_else(|_| config_path.clone());
@@ -1602,15 +1656,18 @@ fn run_worker(
 
     let schedule = runtime.schedule();
     let schedule_paused = false;
-    let schedule_interval = vykar_core::app::scheduler::schedule_interval(&schedule)
+    let schedule_delay = vykar_core::app::scheduler::next_run_delay(&schedule)
         .unwrap_or_else(|_| Duration::from_secs(24 * 60 * 60));
 
     if let Ok(mut state) = scheduler.lock() {
         state.enabled = schedule.enabled;
         state.paused = false;
-        state.every = schedule_interval;
+        state.every = schedule
+            .every_duration()
+            .unwrap_or(Duration::from_secs(24 * 60 * 60));
+        state.cron = schedule.cron.clone();
         state.jitter_seconds = schedule.jitter_seconds;
-        state.next_run = Some(Instant::now() + schedule_interval);
+        state.next_run = Some(Instant::now() + schedule_delay);
     }
 
     let _ = ui_tx.send(UiEvent::ConfigInfo {
@@ -2802,7 +2859,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let backup_running = Arc::new(AtomicBool::new(false));
     let cancel_requested = Arc::new(AtomicBool::new(false));
 
-    spawn_scheduler(app_tx.clone(), scheduler.clone(), backup_running.clone());
+    spawn_scheduler(
+        app_tx.clone(),
+        ui_tx.clone(),
+        scheduler.clone(),
+        backup_running.clone(),
+    );
 
     thread::spawn({
         let app_tx = app_tx.clone();

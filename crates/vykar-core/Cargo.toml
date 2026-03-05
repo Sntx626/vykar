@@ -41,6 +41,7 @@ ignore = "0.4"
 
 # Time
 chrono.workspace = true
+croner.workspace = true
 
 # Memory-mapped I/O
 memmap2 = "0.9"

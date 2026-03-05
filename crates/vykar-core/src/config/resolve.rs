@@ -298,8 +298,9 @@ fn resolve_document(mut raw: ConfigDocument) -> vykar_types::error::Result<Vec<R
         }
     }
 
-    // Validate global hooks and chunker params
+    // Validate global hooks, schedule, and chunker params
     raw.hooks.validate()?;
+    raw.schedule.validate()?;
     raw.limits.validate()?;
     raw.chunker.validate();
     raw.compact.validate();
@@ -2112,7 +2113,7 @@ sources:
         fs::write(&path, yaml).unwrap();
 
         let repos = load_and_resolve(&path).unwrap();
-        assert_eq!(repos[0].config.schedule.every, "12");
+        assert_eq!(repos[0].config.schedule.every, Some("12".to_string()));
         assert_eq!(
             repos[0].config.schedule.every_duration().unwrap().as_secs(),
             12 * 24 * 60 * 60

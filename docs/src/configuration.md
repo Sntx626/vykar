@@ -407,12 +407,36 @@ Configure the built-in daemon scheduler for automatic periodic backups. Used wit
 schedule:
   enabled: true                        # Enable scheduled backups (default false)
   every: "6h"                          # Interval between runs: "30m", "6h", "2d", or integer days (default "24h")
+  # cron: "0 3 * * *"                 # OR 5-field cron expression (mutually exclusive with every)
   on_startup: false                    # Run a backup immediately when the daemon starts (default false)
-  jitter_seconds: 0                    # Random delay 0–N seconds added to each interval (default 0)
+  jitter_seconds: 0                    # Random delay 0–N seconds added to each run (default 0)
   passphrase_prompt_timeout_seconds: 300  # Timeout for interactive passphrase prompts (default 300)
 ```
 
-The `every` field accepts `m` (minutes), `h` (hours), or `d` (days) suffixes; a plain integer is treated as days.
+### Interval mode
+
+The `every` field accepts `m` (minutes), `h` (hours), or `d` (days) suffixes; a plain integer is treated as days. If neither `every` nor `cron` is set, the default interval is `24h`.
+
+### Cron mode
+
+The `cron` field accepts a standard 5-field cron expression (`minute hour dom month dow`). Six-field (with seconds) and seven-field expressions are rejected.
+
+```yaml
+schedule:
+  enabled: true
+  cron: "0 3 * * *"          # daily at 3:00 AM
+  jitter_seconds: 60
+```
+
+Common cron examples:
+- `"0 3 * * *"` — daily at 3:00 AM
+- `"30 2 * * 1-5"` — weekdays at 2:30 AM
+- `"0 */6 * * *"` — every 6 hours on the hour
+- `"0 0 * * 0"` — weekly on Sunday at midnight
+
+`every` and `cron` are **mutually exclusive** — setting both is a configuration error.
+
+Jitter (`jitter_seconds`) applies in both modes. In cron mode, jitter is added after the computed cron tick. Keep jitter small relative to the cron cadence to avoid skipping slots.
 
 When multiple repositories are configured, schedule values are merged: `enabled` and `on_startup` are OR'd across repos, `jitter_seconds` and `passphrase_prompt_timeout_seconds` take the maximum, and `every` uses the shortest interval.
 

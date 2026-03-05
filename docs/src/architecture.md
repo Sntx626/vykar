@@ -430,9 +430,9 @@ Two-stage signal handling applies to all commands:
 
 ### Daemon Mode
 
-`vykar daemon` runs scheduled backup cycles as a foreground process (no cron dependency).
+`vykar daemon` runs scheduled backup cycles as a foreground process.
 
-- **Scheduling**: sleep-loop with configurable interval (`schedule.every` human-duration string, e.g. `"6h"`). Optional random jitter (`jitter_seconds`) spreads load across hosts.
+- **Scheduling**: sleep-loop with configurable interval (`schedule.every`, e.g. `"6h"`) or cron expression (`schedule.cron`, e.g. `"0 3 * * *"`). Optional random jitter (`jitter_seconds`) spreads load across hosts.
 - **Cycle**: `backup → prune → compact → check` per repo, sequential. Shutdown flag checked between steps.
 - **Passphrase**: daemon validates at startup that all encrypted repos have a non-interactive passphrase source (`passcommand`, `passphrase`, or `VYKAR_PASSPHRASE` env). Cannot prompt interactively.
 
@@ -440,7 +440,8 @@ Configuration:
 ```yaml
 schedule:
   enabled: true
-  every: "6h"
+  every: "6h"                  # fixed interval
+  # cron: "0 3 * * *"         # OR 5-field cron (mutually exclusive with every)
   on_startup: false
   jitter_seconds: 0
 ```

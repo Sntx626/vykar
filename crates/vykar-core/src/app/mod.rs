@@ -35,6 +35,7 @@ impl RuntimeConfig {
             match (merged_secs, candidate_secs) {
                 (Some(current), Some(candidate)) if candidate < current => {
                     merged.every = schedule.every.clone();
+                    merged.cron = schedule.cron.clone();
                 }
                 _ => {}
             }

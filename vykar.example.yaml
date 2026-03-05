@@ -189,7 +189,8 @@ compression:
 #
 # schedule:
 #   enabled: false
-#   every: "24h"                  # supports m, h, d
+#   every: "24h"                  # fixed interval: m, h, d
+#   cron: "0 3 * * *"            # OR 5-field cron (mutually exclusive with every)
 #   on_startup: false
 #   jitter_seconds: 0
 #   passphrase_prompt_timeout_seconds: 300

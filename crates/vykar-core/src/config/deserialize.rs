@@ -191,13 +191,6 @@ where
     }
 }
 
-pub(super) fn deserialize_duration_string<'de, D>(deserializer: D) -> Result<String, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    DurationString::deserialize(deserializer).map(DurationString::into_inner)
-}
-
 pub(super) fn deserialize_optional_duration_string<'de, D>(
     deserializer: D,
 ) -> Result<Option<String>, D::Error>
