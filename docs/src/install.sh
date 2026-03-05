@@ -9,8 +9,10 @@ BINARY_NAME="vykar"
 TMPDIR_CLEANUP=""
 
 # Minimum glibc required by the GNU build.
-# Bump this when the CI runner changes (pinned in .github/workflows/release.yml).
-# Current: Ubuntu 24.04 ships glibc 2.39.
+# Bump these when the CI runner changes (pinned in .github/workflows/release.yml).
+# Per-architecture: x86_64 uses Ubuntu 24.04 (glibc 2.39),
+#                   aarch64 uses Ubuntu 22.04 (glibc 2.35).
+# MIN_GLIBC_MINOR is set per-architecture in detect_platform().
 MIN_GLIBC_MAJOR=2
 MIN_GLIBC_MINOR=39
 
@@ -106,10 +108,16 @@ detect_platform() {
         Linux)
             case "$arch" in
                 x86_64)
+                    MIN_GLIBC_MINOR=39    # Ubuntu 24.04
                     detect_linux_libc
                     TARGET="x86_64-unknown-linux-${LIBC}"
                     ;;
-                *)       die "unsupported Linux architecture: $arch (only x86_64 builds are available)" ;;
+                aarch64|arm64)
+                    MIN_GLIBC_MINOR=35    # Ubuntu 22.04
+                    detect_linux_libc
+                    TARGET="aarch64-unknown-linux-${LIBC}"
+                    ;;
+                *)       die "unsupported Linux architecture: $arch (only x86_64 and aarch64 builds are available)" ;;
             esac
             ;;
         Darwin)
