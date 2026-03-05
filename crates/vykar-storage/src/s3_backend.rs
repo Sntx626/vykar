@@ -21,6 +21,7 @@ pub struct S3Backend {
     root: String,
 }
 
+#[allow(clippy::result_large_err)]
 impl S3Backend {
     pub fn new(
         bucket_name: &str,
@@ -95,6 +96,7 @@ impl S3Backend {
     }
 }
 
+#[allow(clippy::result_large_err)]
 impl StorageBackend for S3Backend {
     fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
         use crate::retry::HttpRetryError;
@@ -333,6 +335,7 @@ impl StorageBackend for S3Backend {
     }
 }
 
+#[allow(clippy::result_large_err)]
 impl S3Backend {
     fn put_bytes(&self, key: &str, data: &[u8]) -> Result<()> {
         let full_key = self.full_key(key);

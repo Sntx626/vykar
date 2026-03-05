@@ -21,6 +21,7 @@ pub struct RestBackend {
     retry: RetryConfig,
 }
 
+#[allow(clippy::result_large_err)]
 impl RestBackend {
     pub fn new(base_url: &str, token: Option<&str>, retry: RetryConfig) -> Result<Self> {
         let agent = ureq::AgentBuilder::new()
@@ -158,6 +159,7 @@ impl RestBackend {
     }
 }
 
+#[allow(clippy::result_large_err)]
 impl RestBackend {
     /// Validate a `Content-Range: bytes {start}-{end}/{total}` header against
     /// the requested offset and length.
@@ -252,6 +254,7 @@ impl RestBackend {
     }
 }
 
+#[allow(clippy::result_large_err)]
 impl StorageBackend for RestBackend {
     fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
         use crate::retry::HttpRetryError;
