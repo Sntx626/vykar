@@ -3094,6 +3094,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     UiEvent::ShowWindow => {
                         let _ = ui.show();
+                        #[cfg(target_os = "macos")]
+                        {
+                            use objc2::MainThreadMarker;
+                            use objc2_app_kit::NSApplication;
+                            if let Some(mtm) = MainThreadMarker::new() {
+                                NSApplication::sharedApplication(mtm).activate();
+                            }
+                        }
                     }
                 }
             });
@@ -3650,7 +3658,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    ui.run()?;
+    ui.show()?;
+    slint::run_event_loop_until_quit()?;
 
     // Persist GUI state. Eager saves (config change, resize timer, window hide)
     // cover most paths; this final capture handles Cmd-Q on macOS where the
