@@ -1,5 +1,6 @@
 use std::time::Instant;
 
+use vykar_core::app::operations::{CycleStep, StepOutcome};
 use vykar_core::commands::backup::BackupProgressEvent;
 use vykar_core::commands::check::CheckProgressEvent;
 
@@ -133,5 +134,24 @@ pub fn format_check_status(repo_name: &str, event: &CheckProgressEvent) -> Strin
             verified,
             total_packs,
         } => format!("[{repo_name}] verifying server packs ({verified}/{total_packs})..."),
+    }
+}
+
+/// Format a step outcome for the GUI log. Returns empty string for Ok steps
+/// (backup reports are logged separately with more detail).
+pub fn format_step_outcome(repo_name: &str, step: CycleStep, outcome: &StepOutcome) -> String {
+    let name = step.command_name();
+    match outcome {
+        StepOutcome::Ok => {
+            if matches!(step, CycleStep::Backup) {
+                // Backup details are logged via log_backup_report
+                String::new()
+            } else {
+                format!("[{repo_name}] {name}: ok")
+            }
+        }
+        StepOutcome::Partial => format!("[{repo_name}] {name}: ok (partial — some files skipped)"),
+        StepOutcome::Skipped(reason) => format!("[{repo_name}] {name}: skipped ({reason})"),
+        StepOutcome::Failed(e) => format!("[{repo_name}] {name}: FAILED: {e}"),
     }
 }

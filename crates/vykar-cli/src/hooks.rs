@@ -19,6 +19,56 @@ pub struct HookContext {
     pub source_paths: Option<Vec<String>>,
 }
 
+/// Run before hooks for a command: global bare → repo bare → global specific → repo specific.
+///
+/// Returns `Ok(())` on success, `Err` if any before hook fails.
+pub fn run_before(global: &HooksConfig, repo: &HooksConfig, ctx: &mut HookContext) -> Result<()> {
+    let before_key = format!("before_{}", ctx.command);
+    run_hook_list(global.get_hooks("before"), ctx)?;
+    run_hook_list(repo.get_hooks("before"), ctx)?;
+    run_hook_list(global.get_hooks(&before_key), ctx)?;
+    run_hook_list(repo.get_hooks(&before_key), ctx)?;
+    Ok(())
+}
+
+/// Run after or failed hooks depending on `success`.
+///
+/// On success: `after_<cmd>` then `after` (repo then global).
+/// On failure: `failed_<cmd>` then `failed` (repo then global).
+/// Hook failures are logged but don't affect the caller.
+pub fn run_after_or_failed(
+    global: &HooksConfig,
+    repo: &HooksConfig,
+    ctx: &mut HookContext,
+    success: bool,
+) {
+    let cmd = &ctx.command.clone();
+    if success {
+        let after_key = format!("after_{cmd}");
+        log_hook_errors(run_hook_list(repo.get_hooks(&after_key), ctx));
+        log_hook_errors(run_hook_list(global.get_hooks(&after_key), ctx));
+        log_hook_errors(run_hook_list(repo.get_hooks("after"), ctx));
+        log_hook_errors(run_hook_list(global.get_hooks("after"), ctx));
+    } else {
+        let failed_key = format!("failed_{cmd}");
+        log_hook_errors(run_hook_list(repo.get_hooks(&failed_key), ctx));
+        log_hook_errors(run_hook_list(global.get_hooks(&failed_key), ctx));
+        log_hook_errors(run_hook_list(repo.get_hooks("failed"), ctx));
+        log_hook_errors(run_hook_list(global.get_hooks("failed"), ctx));
+    }
+}
+
+/// Run finally hooks: repo specific → global specific → repo bare → global bare.
+///
+/// Hook failures are logged but don't affect the caller.
+pub fn run_finally(global: &HooksConfig, repo: &HooksConfig, ctx: &mut HookContext) {
+    let finally_key = format!("finally_{}", ctx.command);
+    log_hook_errors(run_hook_list(repo.get_hooks(&finally_key), ctx));
+    log_hook_errors(run_hook_list(global.get_hooks(&finally_key), ctx));
+    log_hook_errors(run_hook_list(repo.get_hooks("finally"), ctx));
+    log_hook_errors(run_hook_list(global.get_hooks("finally"), ctx));
+}
+
 /// Run the full hook lifecycle around an action:
 ///
 /// 1. `before` / `before_<cmd>` hooks (global then repo, bare then specific)
@@ -43,22 +93,8 @@ where
         return action();
     }
 
-    let cmd = ctx.command.clone();
-    let before_key = format!("before_{cmd}");
-    let after_key = format!("after_{cmd}");
-    let failed_key = format!("failed_{cmd}");
-    let finally_key = format!("finally_{cmd}");
-
-    // 1. Run before hooks: global bare → repo bare → global specific → repo specific
-    let before_result = (|| -> Result<()> {
-        run_hook_list(global.get_hooks("before"), ctx)?;
-        run_hook_list(repo.get_hooks("before"), ctx)?;
-        run_hook_list(global.get_hooks(&before_key), ctx)?;
-        run_hook_list(repo.get_hooks(&before_key), ctx)?;
-        Ok(())
-    })();
-
-    let action_result = if let Err(e) = before_result {
+    // 1. Run before hooks
+    let action_result = if let Err(e) = run_before(global, repo, ctx) {
         // Before hook failed — skip action, go to failed/finally
         ctx.error = Some(e.to_string());
         Err(e.into())
@@ -68,31 +104,18 @@ where
     };
 
     // 3. After or Failed hooks
-    match &action_result {
-        Ok(_) => {
-            // after: repo specific → global specific → repo bare → global bare
-            log_hook_errors(run_hook_list(repo.get_hooks(&after_key), ctx));
-            log_hook_errors(run_hook_list(global.get_hooks(&after_key), ctx));
-            log_hook_errors(run_hook_list(repo.get_hooks("after"), ctx));
-            log_hook_errors(run_hook_list(global.get_hooks("after"), ctx));
-        }
-        Err(e) => {
+    let success = action_result.is_ok();
+    if !success {
+        if let Err(ref e) = action_result {
             if ctx.error.is_none() {
                 ctx.error = Some(e.to_string());
             }
-            // failed: repo specific → global specific → repo bare → global bare
-            log_hook_errors(run_hook_list(repo.get_hooks(&failed_key), ctx));
-            log_hook_errors(run_hook_list(global.get_hooks(&failed_key), ctx));
-            log_hook_errors(run_hook_list(repo.get_hooks("failed"), ctx));
-            log_hook_errors(run_hook_list(global.get_hooks("failed"), ctx));
         }
     }
+    run_after_or_failed(global, repo, ctx, success);
 
-    // 4. Finally hooks: repo specific → global specific → repo bare → global bare
-    log_hook_errors(run_hook_list(repo.get_hooks(&finally_key), ctx));
-    log_hook_errors(run_hook_list(global.get_hooks(&finally_key), ctx));
-    log_hook_errors(run_hook_list(repo.get_hooks("finally"), ctx));
-    log_hook_errors(run_hook_list(global.get_hooks("finally"), ctx));
+    // 4. Finally hooks
+    run_finally(global, repo, ctx);
 
     action_result
 }

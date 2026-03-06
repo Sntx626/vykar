@@ -1700,9 +1700,9 @@ fn run_worker(
                 backup_running.store(true, Ordering::SeqCst);
                 let _ = ui_tx.send(UiEvent::OperationStarted);
                 let _ = ui_tx.send(UiEvent::Status(if scheduled {
-                    "Running scheduled backup...".to_string()
+                    "Running scheduled backup cycle...".to_string()
                 } else {
-                    "Running backup...".to_string()
+                    "Running backup cycle...".to_string()
                 }));
 
                 let total = runtime.repos.len();
@@ -1714,7 +1714,7 @@ fn run_worker(
 
                     let repo_name = format_repo_name(repo);
                     let _ = ui_tx.send(UiEvent::Status(format!(
-                        "Backing up [{}] ({}/{total})...",
+                        "[{}] ({}/{total})...",
                         repo_name,
                         i + 1
                     )));
@@ -1744,19 +1744,41 @@ fn run_worker(
 
                     let mut tracker = BackupStatusTracker::new(repo_name.clone());
                     let ui_tx_progress = ui_tx.clone();
-                    match operations::run_backup_for_repo_with_progress(
+                    let rn = repo_name.clone();
+                    let result = operations::run_full_cycle_for_repo(
                         &repo.config,
                         &repo.sources,
                         passphrase.as_deref().map(|s| s.as_str()),
-                        &mut |event| {
-                            if let Some(status) = tracker.format(&event) {
-                                let _ = ui_tx_progress.send(UiEvent::Status(status));
+                        Some(&cancel_requested),
+                        &mut |event| match &event {
+                            operations::CycleEvent::StepStarted(step) => {
+                                let _ = ui_tx_progress.send(UiEvent::Status(format!(
+                                    "[{rn}] {}...",
+                                    step.command_name()
+                                )));
                             }
+                            operations::CycleEvent::Backup(evt) => {
+                                if let Some(status) = tracker.format(evt) {
+                                    let _ = ui_tx_progress.send(UiEvent::Status(status));
+                                }
+                            }
+                            operations::CycleEvent::Check(evt) => {
+                                let _ = ui_tx_progress
+                                    .send(UiEvent::Status(format_check_status(&rn, evt)));
+                            }
+                            _ => {}
                         },
-                    ) {
-                        Ok(report) => log_backup_report(&ui_tx, &repo_name, &report),
-                        Err(e) => {
-                            send_log(&ui_tx, format!("[{repo_name}] backup failed: {e}"));
+                        None,
+                        None,
+                    );
+
+                    if let Some(ref report) = result.backup_report {
+                        log_backup_report(&ui_tx, &repo_name, report);
+                    }
+                    for (step, outcome) in &result.steps {
+                        let msg = progress::format_step_outcome(&repo_name, *step, outcome);
+                        if !msg.is_empty() {
+                            send_log(&ui_tx, msg);
                         }
                     }
                 }
@@ -1821,6 +1843,7 @@ fn run_worker(
                             let _ = ui_tx_progress.send(UiEvent::Status(status));
                         }
                     },
+                    Some(&cancel_requested),
                 ) {
                     Ok(report) => log_backup_report(&ui_tx, &rn, &report),
                     Err(e) => send_log(&ui_tx, format!("[{rn}] backup failed: {e}")),
@@ -1899,6 +1922,7 @@ fn run_worker(
                                 let _ = ui_tx_progress.send(UiEvent::Status(status));
                             }
                         },
+                        Some(&cancel_requested),
                     ) {
                         Ok(report) => {
                             any_backed_up = true;

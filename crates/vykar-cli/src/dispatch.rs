@@ -1,11 +1,17 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::io::IsTerminal;
+use std::sync::atomic::AtomicBool;
 
 use crate::hooks::{self, HookContext};
+use crate::progress::BackupProgressRenderer;
+use vykar_core::app::operations::{CycleEvent, CycleStep, FullCycleResult, StepOutcome};
+use vykar_core::commands;
 use vykar_core::config::{EncryptionModeConfig, HooksConfig, SourceEntry, VykarConfig};
 use vykar_storage::{parse_repo_url, ParsedUrl};
 
 use crate::cli::Commands;
 use crate::cmd;
+use crate::format::format_bytes;
+use crate::passphrase::with_repo_passphrase;
 
 pub(crate) fn warn_if_untrusted_rest(config: &VykarConfig, label: Option<&str>) {
     let Ok(parsed) = parse_repo_url(&config.repository.url) else {
@@ -26,13 +32,6 @@ pub(crate) fn warn_if_untrusted_rest(config: &VykarConfig, label: Option<&str>) 
             "Warning: repository '{repo_name}' uses non-HTTPS REST URL '{url}'. Transport is not TLS-protected."
         );
     }
-}
-
-enum StepResult {
-    Ok,
-    Partial,
-    Failed(String),
-    Skipped(&'static str),
 }
 
 fn make_hook_ctx(command: &str, cfg: &VykarConfig, repo_label: &Option<String>) -> HookContext {
@@ -59,143 +58,193 @@ pub(crate) fn run_default_actions(
     verbose: u8,
 ) -> Result<bool, Box<dyn std::error::Error>> {
     let start = std::time::Instant::now();
-    let mut steps: Vec<(&str, StepResult)> = Vec::new();
 
-    let shutting_down = |s: Option<&AtomicBool>| s.is_some_and(|f| f.load(Ordering::SeqCst));
+    // Resolve passphrase once up front so all steps share it.
+    let result = with_repo_passphrase(cfg, label, |passphrase| {
+        let mut before_step = |step: CycleStep| -> std::result::Result<(), String> {
+            let mut ctx = make_hook_ctx(step.command_name(), cfg, repo_label);
+            hooks::run_before(global_hooks, repo_hooks, &mut ctx).map_err(|e| e.to_string())
+        };
 
-    // 1. Backup
-    eprintln!("==> Starting backup");
-    let mut had_partial = false;
-    let backup_ok = match hooks::run_with_hooks(
-        global_hooks,
-        repo_hooks,
-        &mut make_hook_ctx("backup", cfg, repo_label),
-        || {
-            cmd::backup::run_backup(
-                cfg,
-                label,
-                None,
-                None,
-                None,
-                vec![],
-                sources,
-                &[],
-                shutdown,
-                verbose,
-            )
-        },
-    ) {
-        Ok(partial) => {
-            if partial {
-                had_partial = true;
-                steps.push(("backup", StepResult::Partial));
-            } else {
-                steps.push(("backup", StepResult::Ok));
+        let mut after_step = |step: CycleStep, outcome: &StepOutcome| {
+            let mut ctx = make_hook_ctx(step.command_name(), cfg, repo_label);
+            let success = outcome.is_success();
+            if let Some(msg) = outcome.error_msg() {
+                ctx.error = Some(msg.to_string());
             }
-            true
+            hooks::run_after_or_failed(global_hooks, repo_hooks, &mut ctx, success);
+            hooks::run_finally(global_hooks, repo_hooks, &mut ctx);
+        };
+
+        let is_tty = std::io::stderr().is_terminal();
+        let show_progress = is_tty || verbose > 0;
+        let mut backup_renderer: Option<BackupProgressRenderer> = None;
+
+        let cycle_result = vykar_core::app::operations::run_full_cycle_for_repo(
+            cfg,
+            sources,
+            passphrase,
+            shutdown,
+            &mut |event| match &event {
+                CycleEvent::StepStarted(step) => {
+                    eprintln!("==> Starting {}", step.command_name());
+                    if matches!(step, CycleStep::Backup) && show_progress {
+                        backup_renderer = Some(BackupProgressRenderer::new(verbose, is_tty));
+                    }
+                }
+                CycleEvent::StepFinished(step, outcome) => {
+                    if matches!(step, CycleStep::Backup) {
+                        if let Some(ref mut r) = backup_renderer {
+                            r.finish();
+                        }
+                        backup_renderer = None;
+                    }
+                    if matches!(outcome, StepOutcome::Failed(..)) {
+                        if let StepOutcome::Failed(e) = outcome {
+                            eprintln!("Error: {e}");
+                        }
+                    }
+                }
+                CycleEvent::Backup(evt) => {
+                    if let Some(ref mut r) = backup_renderer {
+                        r.on_event(evt.clone());
+                    }
+                }
+                CycleEvent::Check(evt) => {
+                    format_check_progress(evt);
+                }
+            },
+            Some(&mut before_step),
+            Some(&mut after_step),
+        );
+
+        // Ensure renderer is cleaned up if cycle ended abruptly (e.g. shutdown).
+        if let Some(ref mut r) = backup_renderer {
+            r.finish();
         }
-        Err(e) => {
-            eprintln!("Error: {e}");
-            steps.push(("backup", StepResult::Failed(e.to_string())));
-            false
-        }
-    };
 
-    if shutting_down(shutdown) {
-        return print_summary(&steps, start, had_partial);
-    }
+        Ok(cycle_result)
+    })?;
 
-    // 2. Prune — skip if no retention rules configured
-    let has_retention = cfg.retention.has_any_rule()
-        || sources
-            .iter()
-            .any(|s| s.retention.as_ref().is_some_and(|r| r.has_any_rule()));
+    print_step_details(&result);
+    print_summary(&result.steps, start)?;
 
-    if !has_retention {
-        steps.push(("prune", StepResult::Skipped("no retention rules")));
-    } else if !backup_ok {
-        steps.push(("prune", StepResult::Skipped("backup failed")));
+    if result.has_failures() {
+        Err("one or more steps failed".into())
     } else {
-        eprintln!("==> Starting prune");
-        match hooks::run_with_hooks(
-            global_hooks,
-            repo_hooks,
-            &mut make_hook_ctx("prune", cfg, repo_label),
-            || cmd::prune::run_prune(cfg, label, false, false, sources, &[], false, shutdown),
-        ) {
-            Ok(()) => steps.push(("prune", StepResult::Ok)),
-            Err(e) => {
-                eprintln!("Error: {e}");
-                steps.push(("prune", StepResult::Failed(e.to_string())));
-            }
-        }
+        Ok(result.had_partial())
     }
-
-    if shutting_down(shutdown) {
-        return print_summary(&steps, start, had_partial);
-    }
-
-    // 3. Compact
-    if !backup_ok {
-        steps.push(("compact", StepResult::Skipped("backup failed")));
-    } else {
-        eprintln!("==> Starting compact");
-        match hooks::run_with_hooks(
-            global_hooks,
-            repo_hooks,
-            &mut make_hook_ctx("compact", cfg, repo_label),
-            || cmd::compact::run_compact(cfg, label, cfg.compact.threshold, None, false, shutdown),
-        ) {
-            Ok(()) => steps.push(("compact", StepResult::Ok)),
-            Err(e) => {
-                eprintln!("Error: {e}");
-                steps.push(("compact", StepResult::Failed(e.to_string())));
-            }
-        }
-    }
-
-    if shutting_down(shutdown) {
-        return print_summary(&steps, start, had_partial);
-    }
-
-    // 4. Check (metadata-only)
-    eprintln!("==> Starting check");
-    match hooks::run_with_hooks(
-        global_hooks,
-        repo_hooks,
-        &mut make_hook_ctx("check", cfg, repo_label),
-        || cmd::check::run_check(cfg, label, false, false),
-    ) {
-        Ok(()) => steps.push(("check", StepResult::Ok)),
-        Err(e) => {
-            eprintln!("Error: {e}");
-            steps.push(("check", StepResult::Failed(e.to_string())));
-        }
-    }
-
-    print_summary(&steps, start, had_partial)
 }
 
-/// Prints the summary and returns `Ok(had_partial)`.
+/// Print the detailed per-step output (matching what individual CLI wrappers print).
+fn print_step_details(result: &FullCycleResult) {
+    // Backup summaries
+    if let Some(ref report) = result.backup_report {
+        for created in &report.created {
+            let stats = &created.stats;
+            let paths_display = created.source_paths.join(", ");
+            println!("Snapshot created: {}", created.snapshot_name);
+            println!(
+                "  Source: {paths_display} (label: {})",
+                created.source_label
+            );
+            if stats.errors > 0 {
+                eprintln!(
+                    "Warning: {} file(s) could not be read and were excluded from the snapshot",
+                    stats.errors
+                );
+                println!(
+                    "  Files: {}, Errors: {}, Original: {}, Compressed: {}, Deduplicated: {}",
+                    stats.nfiles,
+                    stats.errors,
+                    format_bytes(stats.original_size),
+                    format_bytes(stats.compressed_size),
+                    format_bytes(stats.deduplicated_size),
+                );
+            } else {
+                println!(
+                    "  Files: {}, Original: {}, Compressed: {}, Deduplicated: {}",
+                    stats.nfiles,
+                    format_bytes(stats.original_size),
+                    format_bytes(stats.compressed_size),
+                    format_bytes(stats.deduplicated_size),
+                );
+            }
+        }
+    }
+
+    // Prune stats
+    if let Some(ref stats) = result.prune_stats {
+        println!(
+            "Pruned {} snapshots (kept {}), freed {} chunks ({})",
+            stats.pruned,
+            stats.kept,
+            stats.chunks_deleted,
+            format_bytes(stats.space_freed),
+        );
+    }
+
+    // Compact stats
+    if let Some(ref stats) = result.compact_stats {
+        println!(
+            "Compaction complete: {} packs repacked, {} empty packs deleted, {} freed",
+            stats.packs_repacked,
+            stats.packs_deleted_empty,
+            format_bytes(stats.space_freed),
+        );
+        if stats.packs_corrupt > 0 {
+            eprintln!(
+                "  Warning: {} corrupt pack(s) found; run `vykar check --verify-data` for details",
+                stats.packs_corrupt,
+            );
+        }
+        if stats.packs_orphan > 0 {
+            eprintln!(
+                "  {} orphan pack(s) (present on disk but not in index)",
+                stats.packs_orphan,
+            );
+        }
+    }
+
+    // Check results
+    if let Some(ref result) = result.check_result {
+        if !result.errors.is_empty() {
+            println!("Errors found:");
+            for err in &result.errors {
+                println!("  [{}] {}", err.context, err.message);
+            }
+            println!();
+        }
+        println!(
+            "Check complete: {} snapshots, {} items, {} packs existence-checked ({} chunks), {} chunks data-verified, {} errors",
+            result.snapshots_checked,
+            result.items_checked,
+            result.packs_existence_checked,
+            result.chunks_existence_checked,
+            result.chunks_data_verified,
+            result.errors.len(),
+        );
+    }
+}
+
+/// Prints the summary table.
 fn print_summary(
-    steps: &[(&str, StepResult)],
+    steps: &[(CycleStep, StepOutcome)],
     start: std::time::Instant,
-    had_partial: bool,
-) -> Result<bool, Box<dyn std::error::Error>> {
+) -> Result<(), Box<dyn std::error::Error>> {
     let elapsed = start.elapsed();
-    let mut had_failure = false;
 
     eprintln!();
     eprintln!("=== Summary ===");
-    for (name, result) in steps {
+    for (step, result) in steps {
+        let name = step.command_name();
         match result {
-            StepResult::Ok => eprintln!("  {name:<12} ok"),
-            StepResult::Partial => eprintln!("  {name:<12} ok (partial)"),
-            StepResult::Failed(e) => {
-                had_failure = true;
+            StepOutcome::Ok => eprintln!("  {name:<12} ok"),
+            StepOutcome::Partial => eprintln!("  {name:<12} ok (partial)"),
+            StepOutcome::Failed(e) => {
                 eprintln!("  {name:<12} FAILED: {e}");
             }
-            StepResult::Skipped(reason) => eprintln!("  {name:<12} skipped ({reason})"),
+            StepOutcome::Skipped(reason) => eprintln!("  {name:<12} skipped ({reason})"),
         }
     }
 
@@ -208,10 +257,37 @@ fn print_summary(
         eprintln!("  Duration:    {secs}s");
     }
 
-    if had_failure {
-        Err("one or more steps failed".into())
-    } else {
-        Ok(had_partial)
+    Ok(())
+}
+
+fn format_check_progress(event: &commands::check::CheckProgressEvent) {
+    match event {
+        commands::check::CheckProgressEvent::SnapshotStarted {
+            current,
+            total,
+            name,
+        } => eprintln!("[{current}/{total}] Checking snapshot '{name}'..."),
+        commands::check::CheckProgressEvent::PacksExistencePhaseStarted { total_packs } => {
+            eprintln!("Verifying existence of {total_packs} packs in storage...");
+        }
+        commands::check::CheckProgressEvent::PacksExistenceProgress {
+            checked,
+            total_packs,
+        } => eprintln!("  existence: {checked}/{total_packs} packs"),
+        commands::check::CheckProgressEvent::ChunksDataPhaseStarted { total_chunks } => {
+            eprintln!("Verifying data integrity of {total_chunks} chunks...");
+        }
+        commands::check::CheckProgressEvent::ChunksDataProgress {
+            verified,
+            total_chunks,
+        } => eprintln!("  verify-data: {verified}/{total_chunks}"),
+        commands::check::CheckProgressEvent::ServerVerifyPhaseStarted { total_packs } => {
+            eprintln!("Server-side verification of {total_packs} packs...");
+        }
+        commands::check::CheckProgressEvent::ServerVerifyProgress {
+            verified,
+            total_packs,
+        } => eprintln!("  server-verify: {verified}/{total_packs} packs"),
     }
 }
 
