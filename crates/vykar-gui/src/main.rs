@@ -3215,7 +3215,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let log_tx = ui_tx_for_cancel.clone();
         ui.on_cancel_clicked(move || {
             cancel.store(true, Ordering::SeqCst);
-            send_log(&log_tx, "Cancel requested; will stop after current step completes.");
+            send_log(
+                &log_tx,
+                "Cancel requested; will stop after current step completes.",
+            );
         });
     }
 
@@ -3700,7 +3703,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let _ = tx.send(AppCommand::RunBackupAll { scheduled: false });
                 } else if event.id == cancel_item_id {
                     cancel.store(true, Ordering::SeqCst);
-                    send_log(&log_tx, "Cancel requested; will stop after current step completes.");
+                    send_log(
+                        &log_tx,
+                        "Cancel requested; will stop after current step completes.",
+                    );
                 } else if event.id == quit_item_id {
                     let _ = tx.send(AppCommand::Quit);
                     break;
