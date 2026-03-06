@@ -304,6 +304,8 @@ limits:                              # Optional backup resource limits
 
 Shell commands that run at specific points in the vykar command lifecycle. Hooks can be defined at three levels: global (top-level `hooks:`), per-repository, and per-source.
 
+**Global / per-repository hooks** support both bare prefixes and command-specific variants:
+
 ```yaml
 hooks:                               # Global hooks: run for backup/prune/check/compact
   before: "echo starting"
@@ -313,16 +315,27 @@ hooks:                               # Global hooks: run for backup/prune/check/
   # finally: "cleanup.sh"
 ```
 
+**Per-source hooks** only support bare prefixes (`before`, `after`, `failed`, `finally`) — command-specific variants like `before_backup` are not valid at the source level. Source hooks always run for `backup` since that is the only command that processes sources.
+
+```yaml
+sources:
+  - path: /raid1/immich/db-backups
+    label: immich
+    hooks:
+      before: '/raid1/immich/backup_db.sh'  # Correct
+      # before_backup: '...'               # NOT valid here — use 'before' instead
+```
+
 ### Hook types
 
-| Hook                | Runs when                        | Failure behavior       |
-|---------------------|----------------------------------|------------------------|
-| `before` / `before_<cmd>`   | Before the command      | Aborts the command     |
-| `after` / `after_<cmd>`     | After success only      | Logged, doesn't affect result |
-| `failed` / `failed_<cmd>`   | After failure only      | Logged, doesn't affect result |
-| `finally` / `finally_<cmd>` | Always, regardless of outcome | Logged, doesn't affect result |
+| Hook       | Command-specific (global/repo only) | Runs when                        | Failure behavior       |
+|------------|--------------------------------------|----------------------------------|------------------------|
+| `before`   | `before_<cmd>`                       | Before the command               | Aborts the command     |
+| `after`    | `after_<cmd>`                        | After success only               | Logged, doesn't affect result |
+| `failed`   | `failed_<cmd>`                       | After failure only               | Logged, doesn't affect result |
+| `finally`  | `finally_<cmd>`                      | Always, regardless of outcome    | Logged, doesn't affect result |
 
-Hooks only run for `backup`, `prune`, `check`, and `compact`. The bare form (`before`, `after`, etc.) fires for all four commands, while the command-specific form (`before_backup`, `failed_prune`, etc.) fires only for that command.
+Hooks only run for `backup`, `prune`, `check`, and `compact`. The bare form (`before`, `after`, etc.) fires for all four commands. The command-specific form (`before_backup`, `failed_prune`, etc.) fires only for that command and is only available at the global and per-repository levels — **not** in per-source hooks.
 
 ### Execution order
 

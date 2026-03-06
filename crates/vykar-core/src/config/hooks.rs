@@ -54,6 +54,7 @@ impl HooksConfig {
 
 /// Source-level hooks — simpler than `HooksConfig`, only bare prefixes.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SourceHooksConfig {
     #[serde(default, deserialize_with = "deserialize_string_or_vec")]
     pub before: Vec<String>,

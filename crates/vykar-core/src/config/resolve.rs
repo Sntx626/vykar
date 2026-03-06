@@ -1710,6 +1710,33 @@ sources:
     }
 
     #[test]
+    fn test_source_hooks_rejects_unknown_keys() {
+        let yaml = r#"
+repositories:
+  - url: /tmp/repo
+sources:
+  - path: /home/user
+    hooks:
+      before_backup:
+        - "echo wrong"
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, yaml).unwrap();
+
+        let err = load_and_resolve(&path).unwrap_err();
+        let msg = err.to_string();
+        // deny_unknown_fields on SourceHooksConfig triggers a deser error;
+        // serde wraps it in the untagged-enum "did not match" message.
+        assert!(
+            msg.contains("before_backup")
+                || msg.contains("unknown field")
+                || msg.contains("did not match"),
+            "expected deserialization error for unknown hook key, got: {msg}"
+        );
+    }
+
+    #[test]
     fn test_empty_sources_allowed() {
         let yaml = r#"
 repositories:
