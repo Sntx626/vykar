@@ -1578,6 +1578,7 @@ fn apply_config(
     passphrases: &mut HashMap<String, zeroize::Zeroizing<String>>,
     scheduler: &Arc<Mutex<SchedulerState>>,
     schedule_paused: bool,
+    scheduler_lock_held: bool,
     ui_tx: &Sender<UiEvent>,
     app_tx: &Sender<AppCommand>,
 ) -> bool {
@@ -1601,8 +1602,8 @@ fn apply_config(
     passphrases.clear();
 
     if let Ok(mut state) = scheduler.lock() {
-        state.enabled = schedule.enabled;
-        state.paused = schedule_paused;
+        state.enabled = schedule.enabled && scheduler_lock_held;
+        state.paused = schedule_paused || !scheduler_lock_held;
         state.every = schedule
             .every_duration()
             .unwrap_or(Duration::from_secs(24 * 60 * 60));
@@ -1617,9 +1618,14 @@ fn apply_config(
     let canonical = dunce::canonicalize(&config_path).unwrap_or_else(|_| config_path.clone());
     *config_display_path = canonical.clone();
 
+    let schedule_desc = if scheduler_lock_held {
+        schedule_description(&schedule, schedule_paused)
+    } else {
+        "disabled (external scheduler)".to_string()
+    };
     let _ = ui_tx.send(UiEvent::ConfigInfo {
         path: canonical.display().to_string(),
-        schedule: schedule_description(&schedule, schedule_paused),
+        schedule: schedule_desc,
     });
     send_structured_data(ui_tx, &runtime.repos);
     let _ = app_tx.send(AppCommand::FetchAllRepoInfo);
@@ -1640,6 +1646,7 @@ fn apply_config(
 
 // ── Worker thread ──
 
+#[allow(clippy::too_many_arguments)]
 fn run_worker(
     app_tx: Sender<AppCommand>,
     cmd_rx: Receiver<AppCommand>,
@@ -1648,6 +1655,7 @@ fn run_worker(
     backup_running: Arc<AtomicBool>,
     cancel_requested: Arc<AtomicBool>,
     mut runtime: app::RuntimeConfig,
+    scheduler_lock_held: bool,
 ) {
     let mut passphrases: HashMap<String, zeroize::Zeroizing<String>> = HashMap::new();
 
@@ -1655,13 +1663,13 @@ fn run_worker(
         .unwrap_or_else(|_| runtime.source.path().to_path_buf());
 
     let schedule = runtime.schedule();
-    let schedule_paused = false;
+    let schedule_paused = !scheduler_lock_held;
     let schedule_delay = vykar_core::app::scheduler::next_run_delay(&schedule)
         .unwrap_or_else(|_| Duration::from_secs(24 * 60 * 60));
 
     if let Ok(mut state) = scheduler.lock() {
-        state.enabled = schedule.enabled;
-        state.paused = false;
+        state.enabled = schedule.enabled && scheduler_lock_held;
+        state.paused = !scheduler_lock_held;
         state.every = schedule
             .every_duration()
             .unwrap_or(Duration::from_secs(24 * 60 * 60));
@@ -1670,9 +1678,14 @@ fn run_worker(
         state.next_run = Some(Instant::now() + schedule_delay);
     }
 
+    let schedule_desc = if scheduler_lock_held {
+        schedule_description(&schedule, false)
+    } else {
+        "disabled (external scheduler)".to_string()
+    };
     let _ = ui_tx.send(UiEvent::ConfigInfo {
         path: config_display_path.display().to_string(),
-        schedule: schedule_description(&schedule, schedule_paused),
+        schedule: schedule_desc,
     });
 
     send_structured_data(&ui_tx, &runtime.repos);
@@ -1685,7 +1698,7 @@ fn run_worker(
     // Auto-fetch repo info at startup
     let _ = app_tx.send(AppCommand::FetchAllRepoInfo);
 
-    if schedule.enabled && schedule.on_startup {
+    if scheduler_lock_held && schedule.enabled && schedule.on_startup {
         send_log(
             &ui_tx,
             "Scheduled on-startup backup requested by configuration.",
@@ -2607,6 +2620,7 @@ fn run_worker(
                     &mut passphrases,
                     &scheduler,
                     schedule_paused,
+                    scheduler_lock_held,
                     &ui_tx,
                     &app_tx,
                 );
@@ -2626,6 +2640,7 @@ fn run_worker(
                         &mut passphrases,
                         &scheduler,
                         schedule_paused,
+                        scheduler_lock_held,
                         &ui_tx,
                         &app_tx,
                     );
@@ -2661,6 +2676,7 @@ fn run_worker(
                     &mut passphrases,
                     &scheduler,
                     schedule_paused,
+                    scheduler_lock_held,
                     &ui_tx,
                     &app_tx,
                 ) {
@@ -2883,12 +2899,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let backup_running = Arc::new(AtomicBool::new(false));
     let cancel_requested = Arc::new(AtomicBool::new(false));
 
+    // Attempt to acquire the process-wide scheduler lock.
+    // If another scheduler (daemon or GUI) holds it, disable automatic scheduling
+    // but keep the GUI fully functional for manual operations.
+    let scheduler_lock = vykar_core::app::scheduler::SchedulerLock::try_acquire();
+    let scheduler_lock_held = scheduler_lock.is_some();
+    // Keep the lock alive for the entire process lifetime.
+    let _scheduler_lock = scheduler_lock;
+
+    if !scheduler_lock_held {
+        let _ = ui_tx.send(UiEvent::LogEntry {
+            timestamp: Local::now().format("%H:%M:%S").to_string(),
+            message: "Scheduler disabled \u{2014} another vykar scheduler is already running (daemon or GUI).".to_string(),
+        });
+    }
+
     spawn_scheduler(
         app_tx.clone(),
         ui_tx.clone(),
         scheduler.clone(),
         backup_running.clone(),
     );
+
+    let ui_tx_for_cancel = ui_tx.clone();
 
     thread::spawn({
         let app_tx = app_tx.clone();
@@ -2904,6 +2937,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 backup_running,
                 cancel_requested,
                 runtime,
+                scheduler_lock_held,
             )
         }
     });

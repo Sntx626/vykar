@@ -2,7 +2,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use vykar_core::app::passphrase::configured_passphrase;
-use vykar_core::app::scheduler;
+use vykar_core::app::scheduler::{self, SchedulerLock};
 use vykar_core::config::{EncryptionModeConfig, ResolvedRepo, ScheduleConfig};
 
 use crate::dispatch::{run_default_actions, warn_if_untrusted_rest};
@@ -12,6 +12,9 @@ pub(crate) fn run_daemon(
     repos: &[&ResolvedRepo],
     schedule: &ScheduleConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let _lock = SchedulerLock::try_acquire()
+        .ok_or("another vykar scheduler is already running (daemon or GUI); exiting")?;
+
     if !schedule.enabled {
         return Err(
             "schedule.enabled is false; set it to true in your config to use daemon mode".into(),

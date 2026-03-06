@@ -671,6 +671,81 @@ fn cli_daemon_on_startup_and_shutdown() {
 }
 
 #[test]
+#[cfg(unix)]
+fn cli_daemon_second_instance_rejected_by_scheduler_lock() {
+    use std::process::Stdio;
+
+    let fx = CliFixture::new();
+    let config = format!(
+        "repositories:\n  - url: {}\nencryption:\n  mode: none\nsources: []\nschedule:\n  enabled: true\n  every: \"1h\"\n",
+        yaml_quote_path(&fx.repo_dir)
+    );
+    std::fs::write(&fx.config_path, config).unwrap();
+    let cfg = fx.config_path.to_string_lossy().to_string();
+
+    fx.run_ok(&["--config", &cfg, "init"]);
+
+    // Spawn the first daemon — it should acquire the scheduler lock.
+    let mut first = Command::new(vykar_binary_path())
+        .args(["--config", &cfg, "daemon"])
+        .env("HOME", &fx.home_dir)
+        .env("XDG_CACHE_HOME", &fx.cache_dir)
+        .env("NO_COLOR", "1")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    // Give the first daemon time to acquire the lock.
+    std::thread::sleep(Duration::from_secs(2));
+
+    // Verify the first daemon is still running (didn't crash).
+    assert!(
+        first.try_wait().unwrap().is_none(),
+        "first daemon should still be running"
+    );
+
+    // Spawn the second daemon — it should fail immediately with the lock error.
+    let second_output = Command::new(vykar_binary_path())
+        .args(["--config", &cfg, "daemon"])
+        .env("HOME", &fx.home_dir)
+        .env("XDG_CACHE_HOME", &fx.cache_dir)
+        .env("NO_COLOR", "1")
+        .output()
+        .unwrap();
+
+    assert!(
+        !second_output.status.success(),
+        "second daemon should exit with non-zero status"
+    );
+    let second_stderr = stderr(&second_output);
+    assert!(
+        second_stderr.contains("another vykar scheduler is already running"),
+        "expected scheduler lock error, got:\n{second_stderr}"
+    );
+
+    // Clean up the first daemon.
+    Command::new("kill")
+        .args(["-TERM", &first.id().to_string()])
+        .status()
+        .unwrap();
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        match first.try_wait().unwrap() {
+            Some(_) => break,
+            None => {
+                if std::time::Instant::now() > deadline {
+                    first.kill().unwrap();
+                    panic!("first daemon did not exit within 10 seconds after SIGTERM");
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+    }
+}
+
+#[test]
 fn cli_empty_config_exits_with_error() {
     let fx = CliFixture::new();
     let yaml = "encryption:\n  mode: none\n";
