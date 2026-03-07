@@ -1,5 +1,6 @@
 pub mod file_cache;
 pub mod format;
+pub mod identity;
 pub mod lock;
 pub mod manifest;
 pub mod pack;

@@ -411,6 +411,7 @@ fn resolve_document(mut raw: ConfigDocument) -> vykar_types::error::Result<Vec<R
                         .map(str::trim)
                         .filter(|s| !s.is_empty())
                         .map(expand_tilde),
+                    trust_repo: false,
                 },
                 global_hooks: raw.hooks.clone(),
                 repo_hooks,
@@ -1205,6 +1206,7 @@ repositories:
                 limits: ResourceLimitsConfig::default(),
                 compact: CompactConfig::default(),
                 cache_dir: None,
+                trust_repo: false,
             },
             global_hooks: HooksConfig::default(),
             repo_hooks: HooksConfig::default(),

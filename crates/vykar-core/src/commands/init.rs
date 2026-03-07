@@ -1,5 +1,5 @@
 use crate::config::{EncryptionModeConfig, VykarConfig};
-use crate::repo::{EncryptionMode, Repository};
+use crate::repo::{identity, EncryptionMode, Repository};
 use crate::storage;
 use vykar_crypto::select::{self, AutoAeadMode};
 use vykar_types::error::Result;
@@ -26,6 +26,18 @@ pub fn run(config: &VykarConfig, passphrase: Option<&str>) -> Result<Repository>
         Some(&config.repository),
         super::util::cache_dir_from_config(config),
     )?;
+
+    // Pin the repository identity immediately to close the TOFU window.
+    // Failure is non-fatal: the repo already exists on storage.
+    if let Err(e) = identity::verify_or_pin(
+        &config.repository.url,
+        &repo.config.id,
+        repo.crypto.chunk_id_key(),
+        super::util::cache_dir_from_config(config).as_deref(),
+        true, // always pin at init (no pre-existing pin to conflict with)
+    ) {
+        tracing::warn!("could not pin repository identity: {e}");
+    }
 
     Ok(repo)
 }

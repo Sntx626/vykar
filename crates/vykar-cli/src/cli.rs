@@ -26,6 +26,11 @@ pub(crate) struct Cli {
     #[arg(short, long, action = clap::ArgAction::Count)]
     pub verbose: u8,
 
+    /// Accept a changed repository identity and re-pin.
+    /// Requires -R/--repo when multiple repositories are configured.
+    #[arg(long, global = true)]
+    pub trust_repo: bool,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 }

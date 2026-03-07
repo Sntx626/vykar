@@ -37,6 +37,9 @@ pub struct VykarConfig {
     /// Default: platform cache dir + "vykar" (e.g. ~/.cache/vykar/).
     #[serde(default)]
     pub cache_dir: Option<String>,
+    /// Runtime-only: accept a changed repository identity and re-pin.
+    #[serde(skip)]
+    pub trust_repo: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

@@ -82,6 +82,7 @@ fn make_test_config(repo_dir: &std::path::Path) -> VykarConfig {
         limits: ResourceLimitsConfig::default(),
         compact: CompactConfig::default(),
         cache_dir: None,
+        trust_repo: false,
     }
 }
 

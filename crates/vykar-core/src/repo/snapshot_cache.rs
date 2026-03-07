@@ -249,13 +249,9 @@ mod tests {
         let id = SnapshotId::generate();
         let meta = make_snapshot_meta(name);
         let meta_bytes = rmp_serde::to_vec(&meta).unwrap();
-        let packed = pack_object_with_context(
-            ObjectType::SnapshotMeta,
-            id.as_bytes(),
-            &meta_bytes,
-            crypto,
-        )
-        .unwrap();
+        let packed =
+            pack_object_with_context(ObjectType::SnapshotMeta, id.as_bytes(), &meta_bytes, crypto)
+                .unwrap();
         storage.put(&id.storage_key(), &packed).unwrap();
         id
     }

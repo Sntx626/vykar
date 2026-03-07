@@ -80,7 +80,7 @@ fn main() {
 
     tracing::info!("Using config: {source}");
 
-    let all_repos = match config::load_and_resolve(source.path()) {
+    let mut all_repos = match config::load_and_resolve(source.path()) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("Error: {e}");
@@ -91,6 +91,23 @@ fn main() {
     if all_repos.is_empty() {
         eprintln!("Error: no repositories configured. Edit your config file and add a 'repositories' section.");
         std::process::exit(1);
+    }
+
+    // --trust-repo validation: must target exactly one repo.
+    // Rejected for daemon (long-lived, fan-out) and for multi-repo without -R
+    // (would silently re-pin unrelated repos during probing/dispatch).
+    if cli.trust_repo {
+        if matches!(&cli.command, Some(Commands::Daemon)) {
+            eprintln!("Error: --trust-repo cannot be used with the daemon command");
+            std::process::exit(1);
+        }
+        let repo_selector = cli.command.as_ref().and_then(|cmd| cmd.repo());
+        if repo_selector.is_none() && all_repos.len() > 1 {
+            eprintln!(
+                "Error: --trust-repo requires -R / --repo when multiple repositories are configured"
+            );
+            std::process::exit(1);
+        }
     }
 
     // Handle `daemon` subcommand early — operates on all repos at once
@@ -108,21 +125,35 @@ fn main() {
         return;
     }
 
-    // Filter by --repo if provided on the subcommand
+    // Resolve --repo selector and set --trust-repo on the single targeted repo.
     let repo_selector = cli.command.as_ref().and_then(|cmd| cmd.repo());
-    let repos: Vec<&ResolvedRepo> = if let Some(selector) = repo_selector {
-        match config::select_repo(&all_repos, selector) {
-            Some(r) => vec![r],
-            None => {
-                eprintln!("Error: no repository matching '{selector}'");
-                eprintln!("Available repositories:");
-                for r in &all_repos {
-                    let label = r.label.as_deref().unwrap_or("-");
-                    eprintln!("  {label:12} {}", r.config.repository.url);
+    if let Some(selector) = repo_selector {
+        let found = all_repos
+            .iter()
+            .any(|r| r.label.as_deref() == Some(selector) || r.config.repository.url == selector);
+        if !found {
+            eprintln!("Error: no repository matching '{selector}'");
+            eprintln!("Available repositories:");
+            for r in &all_repos {
+                let label = r.label.as_deref().unwrap_or("-");
+                eprintln!("  {label:12} {}", r.config.repository.url);
+            }
+            std::process::exit(1);
+        }
+        if cli.trust_repo {
+            for repo in &mut all_repos {
+                if repo.label.as_deref() == Some(selector) || repo.config.repository.url == selector
+                {
+                    repo.config.trust_repo = true;
                 }
-                std::process::exit(1);
             }
         }
+    } else if cli.trust_repo {
+        // Single-repo config (multi-repo already rejected above).
+        all_repos[0].config.trust_repo = true;
+    }
+    let repos: Vec<&ResolvedRepo> = if let Some(selector) = repo_selector {
+        vec![config::select_repo(&all_repos, selector).unwrap()]
     } else {
         all_repos.iter().collect()
     };

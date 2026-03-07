@@ -250,7 +250,15 @@ pub fn run_with_progress(
         passphrase,
         super::util::cache_dir_from_config(config),
     ) {
-        Ok(r) => r,
+        Ok(r) => {
+            if let Err(e) = super::util::verify_repo_identity(config, &r) {
+                if let Ok(cleanup) = storage::backend_from_config(&config.repository, 1) {
+                    lock::deregister_session(cleanup.as_ref(), &session_id);
+                }
+                return Err(e);
+            }
+            r
+        }
         Err(e) => {
             let e = super::util::enrich_repo_not_found(e, &config.repository.url);
             // Create a fresh backend just for deregistration (the original was consumed by open).

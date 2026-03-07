@@ -76,6 +76,9 @@ pub enum VykarError {
     #[error("lock expired: {0}")]
     LockExpired(String),
 
+    #[error("repository identity mismatch: {0}")]
+    RepositoryMismatch(String),
+
     #[error("{0}")]
     Other(String),
 }

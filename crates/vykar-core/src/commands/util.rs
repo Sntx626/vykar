@@ -8,7 +8,7 @@ use std::sync::Arc;
 use crate::config::VykarConfig;
 use crate::limits;
 use crate::repo::lock;
-use crate::repo::Repository;
+use crate::repo::{identity, Repository};
 use crate::storage;
 use vykar_types::error::{Result, VykarError};
 
@@ -25,13 +25,26 @@ pub(crate) fn enrich_repo_not_found(err: VykarError, url: &str) -> VykarError {
     }
 }
 
+/// Verify the repository identity against the locally pinned fingerprint.
+pub(crate) fn verify_repo_identity(config: &VykarConfig, repo: &Repository) -> Result<()> {
+    identity::verify_or_pin(
+        &config.repository.url,
+        &repo.config.id,
+        repo.crypto.chunk_id_key(),
+        cache_dir_from_config(config).as_deref(),
+        config.trust_repo,
+    )
+}
+
 /// Open a repository from config using the standard backend resolver.
 pub fn open_repo(config: &VykarConfig, passphrase: Option<&str>) -> Result<Repository> {
     let connections = config.limits.connections;
     let backend = storage::backend_from_config(&config.repository, connections)?;
     let backend = limits::wrap_storage_backend(backend, &config.limits);
-    Repository::open(backend, passphrase, cache_dir_from_config(config))
-        .map_err(|e| enrich_repo_not_found(e, &config.repository.url))
+    let repo = Repository::open(backend, passphrase, cache_dir_from_config(config))
+        .map_err(|e| enrich_repo_not_found(e, &config.repository.url))?;
+    verify_repo_identity(config, &repo)?;
+    Ok(repo)
 }
 
 /// Open a repository without loading the chunk index.
@@ -43,8 +56,10 @@ pub fn open_repo_without_index(
     let connections = config.limits.connections;
     let backend = storage::backend_from_config(&config.repository, connections)?;
     let backend = limits::wrap_storage_backend(backend, &config.limits);
-    Repository::open_without_index(backend, passphrase, cache_dir_from_config(config))
-        .map_err(|e| enrich_repo_not_found(e, &config.repository.url))
+    let repo = Repository::open_without_index(backend, passphrase, cache_dir_from_config(config))
+        .map_err(|e| enrich_repo_not_found(e, &config.repository.url))?;
+    verify_repo_identity(config, &repo)?;
+    Ok(repo)
 }
 
 /// Open a repository without loading the chunk index or file cache.
@@ -56,8 +71,11 @@ pub fn open_repo_without_index_or_cache(
     let connections = config.limits.connections;
     let backend = storage::backend_from_config(&config.repository, connections)?;
     let backend = limits::wrap_storage_backend(backend, &config.limits);
-    Repository::open_without_index_or_cache(backend, passphrase, cache_dir_from_config(config))
-        .map_err(|e| enrich_repo_not_found(e, &config.repository.url))
+    let repo =
+        Repository::open_without_index_or_cache(backend, passphrase, cache_dir_from_config(config))
+            .map_err(|e| enrich_repo_not_found(e, &config.repository.url))?;
+    verify_repo_identity(config, &repo)?;
+    Ok(repo)
 }
 
 /// Open a repo for a read-only operation, registering a session marker
@@ -92,6 +110,11 @@ pub fn open_repo_with_read_session(
 
     match open_result {
         Ok(repo) => {
+            // Verify identity before adopting the session into a guard.
+            if let Err(e) = verify_repo_identity(config, &repo) {
+                deregister_fresh(&session_id);
+                return Err(e);
+            }
             match lock::SessionGuard::adopt(Arc::clone(&repo.storage), session_id.clone()) {
                 Ok(guard) => Ok((repo, guard)),
                 Err(e) => {
