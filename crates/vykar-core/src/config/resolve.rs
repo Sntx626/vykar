@@ -592,9 +592,11 @@ pub fn minimal_config_template() -> &'static str {
 #   algorithm: zstd
 #   zstd_level: 3
 #
-# exclude_patterns:
+# exclude_patterns:                  # Gitignore-style, relative to each source dir
 #   - "*.tmp"
 #   - ".cache/**"
+#   - "/Downloads"                   # Leading / anchors to source root, not filesystem root
+#   # NOTE: absolute paths like "/Users/jane/Movies/TV" do NOT work
 #
 # schedule:
 #   enabled: true
