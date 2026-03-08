@@ -295,6 +295,122 @@ proptest! {
 }
 
 // ---------------------------------------------------------------------------
+// Chunking property tests
+// ---------------------------------------------------------------------------
+
+mod chunker {
+    use std::io::Cursor;
+
+    use proptest::prelude::*;
+
+    use crate::chunker::{chunk_data, chunk_stream};
+    use crate::config::ChunkerConfig;
+
+    /// Generate valid ChunkerConfig values that respect fastcdc's hard bounds:
+    /// MINIMUM_MIN=64, AVERAGE_MIN=256, MAXIMUM_MIN=1024.
+    /// Uses even min_size values to avoid cut_gear rounding issues.
+    fn arb_chunker_config() -> impl Strategy<Value = ChunkerConfig> {
+        // min_size: even values 64–2048
+        (32..=1024u32)
+            .prop_flat_map(|half_min| {
+                let min_size = half_min * 2; // 64–2048, always even
+                let avg_lo = 256u32.max(min_size * 2);
+                let avg_hi = min_size * 8;
+                (Just(min_size), avg_lo..=avg_hi)
+            })
+            .prop_flat_map(|(min_size, avg_size)| {
+                let max_lo = 1024u32.max(avg_size * 2);
+                let max_hi = avg_size * 4;
+                (Just(min_size), Just(avg_size), max_lo..=max_hi)
+            })
+            .prop_map(|(min_size, avg_size, max_size)| ChunkerConfig {
+                min_size,
+                avg_size,
+                max_size,
+            })
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(1000))]
+
+        /// Chunks cover the input with no gaps or overlaps.
+        #[test]
+        fn chunker_completeness(
+            data in prop::collection::vec(any::<u8>(), 0..65536),
+            config in arb_chunker_config(),
+        ) {
+            let chunks = chunk_data(&data, &config);
+
+            // Verify offset continuity
+            let mut expected_offset = 0usize;
+            for &(offset, length) in &chunks {
+                prop_assert_eq!(offset, expected_offset, "gap or overlap at offset {}", offset);
+                expected_offset = offset + length;
+            }
+            prop_assert_eq!(expected_offset, data.len(), "chunks don't cover entire input");
+
+            // Reconstruct and compare
+            let reconstructed: Vec<u8> = chunks.iter()
+                .flat_map(|&(offset, length)| &data[offset..offset + length])
+                .copied()
+                .collect();
+            prop_assert_eq!(&data, &reconstructed);
+        }
+
+        /// Same input and config always produce identical chunk boundaries.
+        #[test]
+        fn chunker_determinism(
+            data in prop::collection::vec(any::<u8>(), 0..65536),
+            config in arb_chunker_config(),
+        ) {
+            let run1 = chunk_data(&data, &config);
+            let run2 = chunk_data(&data, &config);
+            prop_assert_eq!(run1, run2);
+        }
+
+        /// Non-final chunks respect min_size <= length <= max_size.
+        #[test]
+        fn chunker_size_bounds(
+            data in prop::collection::vec(any::<u8>(), 0..65536),
+            config in arb_chunker_config(),
+        ) {
+            let chunks = chunk_data(&data, &config);
+            let min = config.min_size as usize;
+            let max = config.max_size as usize;
+
+            for (i, &(_offset, length)) in chunks.iter().enumerate() {
+                let is_last = i == chunks.len() - 1;
+                if is_last {
+                    prop_assert!(length <= max,
+                        "last chunk {length} exceeds max_size {max}");
+                } else {
+                    prop_assert!(length >= min,
+                        "chunk {i} length {length} < min_size {min}");
+                    prop_assert!(length <= max,
+                        "chunk {i} length {length} > max_size {max}");
+                }
+            }
+        }
+
+        /// Stream and slice APIs produce identical chunk boundaries.
+        #[test]
+        fn chunker_stream_matches_slice(
+            data in prop::collection::vec(any::<u8>(), 0..65536),
+            config in arb_chunker_config(),
+        ) {
+            let slice_chunks = chunk_data(&data, &config);
+            let stream_chunks: Vec<(usize, usize)> = chunk_stream(Cursor::new(&data), &config)
+                .map(|result| {
+                    let chunk = result.expect("stream chunking should succeed");
+                    (chunk.offset as usize, chunk.length)
+                })
+                .collect();
+            prop_assert_eq!(slice_chunks, stream_chunks);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Step 5: Backup-restore round-trip — nested trees
 // ---------------------------------------------------------------------------
 
