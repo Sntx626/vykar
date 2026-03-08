@@ -2,7 +2,7 @@ name: "simple-backup"
 description: "Basic backup-verify-check cycle with a small corpus"
 
 corpus:
-  size_gib: 0.1
+  size_gib: 10
   mix:
     - type: txt
       weight: 3

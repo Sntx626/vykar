@@ -2,7 +2,7 @@ name: "5xchurn"
 description: "5 churn rounds with mixed file types"
 
 corpus:
-  size_gib: 1.0
+  size_gib: 25
   mix:
     - type: txt
       weight: 3
@@ -12,7 +12,7 @@ corpus:
       file_size: 2mb
     - type: bin
       weight: 1
-      file_size: 50mb
+      file_size: 2gb
     - type: png
       weight: 2
       file_size: 200kb
@@ -33,10 +33,10 @@ corpus:
   max_depth: 3
 
 churn:
-  add_files: 15
-  delete_files: 8
+  add_files: 150
+  delete_files: 50
   modify_files: 12
-  add_dirs: 2
+  add_dirs: 6
 
 phases:
   - action: init

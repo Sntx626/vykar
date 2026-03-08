@@ -26,8 +26,13 @@ def main() -> None:
                         help="path to vykar binary (default: from PATH)")
     parser.add_argument("--seed", type=int, default=None,
                         help="RNG seed (default: random)")
+    parser.add_argument("--corpus-gb", type=float, default=None,
+                        help="override corpus size in GiB (default: scenario YAML)")
 
     args = parser.parse_args()
+
+    if args.corpus_gb is not None and args.corpus_gb <= 0:
+        parser.error("--corpus-gb must be greater than 0")
 
     # Resolve vykar binary
     vykar_bin = args.vykar_bin
@@ -41,6 +46,12 @@ def main() -> None:
 
     with open(args.scenario) as f:
         scenario = yaml.safe_load(f)
+    if scenario is None:
+        scenario = {}
+
+    if args.corpus_gb is not None:
+        corpus = scenario.setdefault("corpus", {})
+        corpus["size_gib"] = args.corpus_gb
 
     backends = [args.backend] if args.backend else ["local", "rest", "s3", "sftp"]
     all_passed = True

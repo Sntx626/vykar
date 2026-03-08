@@ -18,6 +18,13 @@ def _log(msg: str) -> None:
     print(f"[scenario] {msg}", file=sys.stderr, flush=True)
 
 
+def _summarize_list_output(stdout: str) -> str:
+    lines = [line for line in stdout.splitlines() if line.strip()]
+    if not lines:
+        return "no snapshots listed"
+    return f"captured {len(lines)} list lines"
+
+
 def _run_phase(phase: dict, *, ctx: dict) -> dict:
     """Execute a single phase. Returns a result dict."""
     action = phase["action"]
@@ -28,6 +35,9 @@ def _run_phase(phase: dict, *, ctx: dict) -> dict:
     vykar_bin = ctx["vykar_bin"]
     config_path = ctx["config_path"]
     repo_label = ctx["repo_label"]
+
+    if action in {"backup", "verify", "churn"}:
+        result["corpus_bytes_at_phase_start"] = corpus.dir_size_bytes(ctx["corpus_dir"])
 
     if action == "init":
         r = vykar_cmd.vykar_init(vykar_bin, config_path, repo_label)
@@ -63,7 +73,11 @@ def _run_phase(phase: dict, *, ctx: dict) -> dict:
     elif action == "list":
         r = vykar_cmd.vykar_list(vykar_bin, config_path, repo_label)
         result["passed"] = r.returncode == 0
-        result["detail"] = r.stdout[:1000] if r.returncode == 0 else r.stderr[-500:]
+        if r.returncode == 0:
+            result["detail"] = _summarize_list_output(r.stdout)
+            result["output"] = r.stdout
+        else:
+            result["detail"] = r.stderr[-500:]
 
     elif action == "prune":
         r = vykar_cmd.vykar_prune(vykar_bin, config_path, repo_label)
@@ -86,10 +100,21 @@ def _run_phase(phase: dict, *, ctx: dict) -> dict:
 
     elif action == "churn":
         churn_cfg = ctx["scenario"].get("churn", {})
-        stats = corpus.apply_churn(ctx["corpus_dir"], ctx["corpus_config"], churn_cfg, ctx["rng"])
+        stats = corpus.apply_churn(
+            ctx["corpus_dir"],
+            ctx["corpus_config"],
+            churn_cfg,
+            ctx["initial_corpus_bytes"],
+            ctx["rng"],
+        )
         result["passed"] = True
-        result["detail"] = (f"added={stats['added']} deleted={stats['deleted']} "
-                            f"modified={stats['modified']} dirs={stats['dirs_added']}")
+        result["stats"] = stats
+        result["detail"] = (
+            f"added={stats['added']} deleted={stats['deleted']} "
+            f"modified={stats['modified']} dirs={stats['dirs_added']} "
+            f"skipped_files={stats['skipped_add_files']} skipped_dirs={stats['skipped_add_dirs']} "
+            f"size={stats['total_bytes_after'] / 1024**2:.1f}/{stats['max_allowed_bytes'] / 1024**2:.1f} MiB"
+        )
 
     elif action == "cleanup":
         vykar_cmd.vykar_delete_repo(vykar_bin, config_path, repo_label)
@@ -117,30 +142,29 @@ def run_scenario(scenario: dict, *, backend: str, runs: int,
 
     all_summaries = []
     all_passed = True
+    corpus_dir = os.path.join(work_dir, "corpus")
+    config_path = os.path.join(work_dir, "config.yaml")
+
+    _log("Preparing corpus")
+    if os.path.exists(corpus_dir):
+        shutil.rmtree(corpus_dir)
+    os.makedirs(corpus_dir, exist_ok=True)
+
+    corpus_stats = corpus.generate_corpus(corpus_dir, corpus_config, random.Random(seed))
+    _log(f"  corpus: {corpus_stats['file_count']} files, "
+         f"{corpus_stats['total_bytes'] / 1024**2:.1f} MiB")
+
+    repo_url = cfg.write_vykar_config(
+        config_path, backend=backend, repo_label=repo_label, corpus_path=corpus_dir)
+    cfg.ensure_backend_ready(backend, repo_url)
+    _log(f"  repo: {repo_url}")
 
     for run_idx in range(1, runs + 1):
         run_rng = random.Random(seed + run_idx)
         run_id = f"{run_idx:03d}"
         run_dir = os.path.join(work_dir, f"run-{run_id}")
         os.makedirs(run_dir, exist_ok=True)
-
-        corpus_dir = os.path.join(work_dir, "corpus")
-        config_path = os.path.join(work_dir, "config.yaml")
-
-        _log(f"Run {run_id}/{runs:03d}: generating corpus")
-
-        # Clean corpus from previous run
-        if os.path.exists(corpus_dir):
-            shutil.rmtree(corpus_dir)
-        os.makedirs(corpus_dir, exist_ok=True)
-
-        corpus_stats = corpus.generate_corpus(corpus_dir, corpus_config, run_rng)
-        _log(f"  corpus: {corpus_stats['file_count']} files, "
-             f"{corpus_stats['total_bytes'] / 1024**2:.1f} MiB")
-
-        repo_url = cfg.write_vykar_config(
-            config_path, backend=backend, repo_label=repo_label, corpus_path=corpus_dir)
-        _log(f"  repo: {repo_url}")
+        _log(f"Run {run_id}/{runs:03d}: using existing corpus")
 
         ctx = {
             "vykar_bin": vykar_bin,
@@ -150,6 +174,7 @@ def run_scenario(scenario: dict, *, backend: str, runs: int,
             "work_dir": work_dir,
             "scenario": scenario,
             "corpus_config": corpus_config,
+            "initial_corpus_bytes": corpus_stats["total_bytes"],
             "rng": run_rng,
             "latest_snapshot": None,
         }
@@ -200,6 +225,7 @@ def run_scenario(scenario: dict, *, backend: str, runs: int,
             "phases_passed": sum(1 for p in phase_results if p["passed"]),
             "phases_total": len(phase_results),
             "failed_phases": failed_phases,
+            "phases": phase_results,
         }
         all_summaries.append(run_summary)
         report.write_run_summary(run_dir, phase_results)

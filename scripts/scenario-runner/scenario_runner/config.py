@@ -1,6 +1,7 @@
 """Generate vykar YAML config files, ported from scripts/lib/vykar-repo.sh."""
 
 import os
+from urllib.parse import urlparse
 
 import yaml
 
@@ -26,6 +27,32 @@ _DEFAULTS = {
     "sftp_known_hosts": os.environ.get("SFTP_KNOWN_HOSTS", ""),
     "sftp_max_connections": os.environ.get("SFTP_MAX_CONNECTIONS", ""),
 }
+
+
+def ensure_backend_ready(backend: str, repo_url: str) -> None:
+    """Prepare backend prerequisites required before vykar init."""
+    if backend != "s3":
+        return
+
+    try:
+        from minio import Minio
+    except ImportError as exc:
+        raise RuntimeError("minio package is not installed; required for S3 bucket setup") from exc
+
+    parsed = urlparse(repo_url.replace("s3+http://", "http://", 1).replace("s3://", "https://", 1))
+    bucket = parsed.path.lstrip("/").split("/", 1)[0]
+    if not parsed.netloc or not bucket:
+        raise ValueError(f"unable to parse S3 bucket from URL: {repo_url}")
+
+    client = Minio(
+        parsed.netloc,
+        access_key=_DEFAULTS["s3_access_key"],
+        secret_key=_DEFAULTS["s3_secret_key"],
+        secure=parsed.scheme == "https",
+        region=_DEFAULTS["s3_region"],
+    )
+    if not client.bucket_exists(bucket):
+        client.make_bucket(bucket)
 
 
 def resolve_repo_url(backend: str, repo_label: str, output_dir: str) -> str:

@@ -297,7 +297,40 @@ def _walk_files(target_dir: str) -> list[str]:
     return result
 
 
+def _dir_size_bytes(target_dir: str) -> int:
+    total = 0
+    for path in _walk_files(target_dir):
+        try:
+            total += os.path.getsize(path)
+        except OSError:
+            pass
+    return total
+
+
+def dir_size_bytes(target_dir: str) -> int:
+    """Return total size of files under target_dir in bytes."""
+    return _dir_size_bytes(target_dir)
+
+
+def _resolve_mix_config(corpus_config: dict) -> tuple[list[str], list[int], dict[str, int], dict[str, dict]]:
+    mix = corpus_config.get("mix", [{"type": "bin", "weight": 1}])
+    types = []
+    weights = []
+    file_sizes = {}
+    file_options = {}
+    for entry in mix:
+        t = entry["type"]
+        if t in _OPTIONAL_PROVIDERS and _OPTIONAL_PROVIDERS[t] is None:
+            continue
+        types.append(t)
+        weights.append(entry.get("weight", 1))
+        file_sizes[t] = parse_size(entry["file_size"]) if "file_size" in entry else _DEFAULT_FILE_SIZE
+        file_options[t] = entry.get("options", {})
+    return types, weights, file_sizes, file_options
+
+
 def apply_churn(target_dir: str, corpus_config: dict, churn_config: dict,
+                initial_corpus_bytes: int,
                 rng: random.Random | None = None) -> dict:
     """Mutate the existing corpus: add, delete, modify files.
 
@@ -306,15 +339,11 @@ def apply_churn(target_dir: str, corpus_config: dict, churn_config: dict,
     if rng is None:
         rng = random.Random()
 
-    mix = corpus_config.get("mix", [{"type": "bin", "weight": 1}])
-    types = [e["type"] for e in mix]
-    weights = [e.get("weight", 1) for e in mix]
-    file_sizes = {}
-    file_options = {}
-    for entry in mix:
-        t = entry["type"]
-        file_sizes[t] = parse_size(entry["file_size"]) if "file_size" in entry else _DEFAULT_FILE_SIZE
-        file_options[t] = entry.get("options", {})
+    max_growth_factor = float(churn_config.get("max_growth_factor", 2.0))
+    if max_growth_factor < 1.0:
+        raise ValueError("churn.max_growth_factor must be >= 1.0")
+
+    types, weights, file_sizes, file_options = _resolve_mix_config(corpus_config)
 
     # Pre-generate text block and lazy faker
     text_block = _generate_text_block(rng)
@@ -322,7 +351,24 @@ def apply_churn(target_dir: str, corpus_config: dict, churn_config: dict,
     fake = _make_faker(rng) if needs_faker else None
     counter = [0]
 
-    stats = {"added": 0, "deleted": 0, "modified": 0, "dirs_added": 0}
+    total_bytes_before = _dir_size_bytes(target_dir)
+    max_allowed_bytes = int(initial_corpus_bytes * max_growth_factor)
+    current_bytes = total_bytes_before
+
+    stats = {
+        "added": 0,
+        "added_bytes": 0,
+        "deleted": 0,
+        "deleted_bytes": 0,
+        "modified": 0,
+        "modified_delta_bytes": 0,
+        "dirs_added": 0,
+        "skipped_add_files": 0,
+        "skipped_add_dirs": 0,
+        "total_bytes_before": total_bytes_before,
+        "total_bytes_after": total_bytes_before,
+        "max_allowed_bytes": max_allowed_bytes,
+    }
 
     # Collect existing subdirectories
     subdirs = []
@@ -333,45 +379,23 @@ def apply_churn(target_dir: str, corpus_config: dict, churn_config: dict,
     if not subdirs:
         subdirs = [""]
 
-    # Add new directories
-    for _ in range(churn_config.get("add_dirs", 0)):
-        parent = rng.choice(subdirs)
-        name = f"churn_{rng.randint(0, 99999):05d}"
-        rel = os.path.join(parent, name) if parent else name
-        full = os.path.join(target_dir, rel)
-        os.makedirs(full, exist_ok=True)
-        subdirs.append(rel)
-
-        # Add 1-3 files in new dir
-        for _ in range(rng.randint(1, 3)):
-            ft = rng.choices(types, weights=weights, k=1)[0]
-            size = file_sizes[ft]
-            path = _generate_one(ft, full, size, file_options[ft],
-                                 rng, text_block, fake, counter)
-            if path and os.path.exists(path):
-                stats["added"] += 1
-        stats["dirs_added"] += 1
-
-    # Add files in existing dirs
-    for _ in range(churn_config.get("add_files", 0)):
-        ft = rng.choices(types, weights=weights, k=1)[0]
-        subdir = rng.choice(subdirs)
-        full_subdir = os.path.join(target_dir, subdir) if subdir else target_dir
-        os.makedirs(full_subdir, exist_ok=True)
-        size = file_sizes[ft]
-        path = _generate_one(ft, full_subdir, size, file_options[ft],
-                             rng, text_block, fake, counter)
-        if path and os.path.exists(path):
-            stats["added"] += 1
-
     # Delete random files
     files = _walk_files(target_dir)
     n_delete = min(churn_config.get("delete_files", 0), len(files))
     if n_delete > 0:
         to_delete = rng.sample(files, n_delete)
         for f in to_delete:
-            os.unlink(f)
-            stats["deleted"] += 1
+            try:
+                size = os.path.getsize(f)
+            except OSError:
+                size = 0
+            try:
+                os.unlink(f)
+                current_bytes = max(0, current_bytes - size)
+                stats["deleted"] += 1
+                stats["deleted_bytes"] += size
+            except OSError:
+                pass
         # Refresh file list
         files = _walk_files(target_dir)
 
@@ -381,6 +405,7 @@ def apply_churn(target_dir: str, corpus_config: dict, churn_config: dict,
         to_modify = rng.sample(files, n_modify)
         for f in to_modify:
             try:
+                before_size = os.path.getsize(f)
                 # Check if file looks like text
                 is_text = f.endswith(_TEXT_EXTENSIONS)
                 if is_text:
@@ -394,8 +419,78 @@ def apply_churn(target_dir: str, corpus_config: dict, churn_config: dict,
                         fh.truncate(trunc)
                         fh.seek(0, 2)
                         fh.write(rng.randbytes(rng.randint(64, 4096)))
+                after_size = os.path.getsize(f)
+                delta = after_size - before_size
+                current_bytes = max(0, current_bytes + delta)
                 stats["modified"] += 1
+                stats["modified_delta_bytes"] += delta
             except (OSError, PermissionError):
                 pass
 
+    def _try_add_file(dest_dir: str) -> bool:
+        nonlocal current_bytes
+
+        ft = rng.choices(types, weights=weights, k=1)[0]
+        estimated_size = file_sizes[ft]
+        if current_bytes + estimated_size > max_allowed_bytes:
+            stats["skipped_add_files"] += 1
+            return False
+
+        path = _generate_one(ft, dest_dir, estimated_size, file_options[ft],
+                             rng, text_block, fake, counter)
+        if not path or not os.path.exists(path):
+            return False
+
+        try:
+            actual_size = os.path.getsize(path)
+            current_bytes += actual_size
+            stats["added_bytes"] += actual_size
+        except OSError:
+            pass
+        stats["added"] += 1
+        return True
+
+    # Add new directories after deletes/modifies, but skip directories if none of
+    # their planned files can fit within the remaining growth budget.
+    for _ in range(churn_config.get("add_dirs", 0)):
+        parent = rng.choice(subdirs)
+        name = f"churn_{rng.randint(0, 99999):05d}"
+        rel = os.path.join(parent, name) if parent else name
+        full = os.path.join(target_dir, rel)
+
+        planned = [
+            rng.choices(types, weights=weights, k=1)[0]
+            for _ in range(rng.randint(1, 3))
+        ]
+        if not any(current_bytes + file_sizes[ft] <= max_allowed_bytes for ft in planned):
+            stats["skipped_add_dirs"] += 1
+            continue
+
+        os.makedirs(full, exist_ok=True)
+        subdirs.append(rel)
+        stats["dirs_added"] += 1
+        for ft in planned:
+            estimated_size = file_sizes[ft]
+            if current_bytes + estimated_size > max_allowed_bytes:
+                stats["skipped_add_files"] += 1
+                continue
+            path = _generate_one(ft, full, estimated_size, file_options[ft],
+                                 rng, text_block, fake, counter)
+            if path and os.path.exists(path):
+                try:
+                    actual_size = os.path.getsize(path)
+                    current_bytes += actual_size
+                    stats["added_bytes"] += actual_size
+                except OSError:
+                    pass
+                stats["added"] += 1
+
+    # Add files in existing dirs last and stop each individual add at the cap.
+    for _ in range(churn_config.get("add_files", 0)):
+        subdir = rng.choice(subdirs)
+        full_subdir = os.path.join(target_dir, subdir) if subdir else target_dir
+        os.makedirs(full_subdir, exist_ok=True)
+        _try_add_file(full_subdir)
+
+    stats["total_bytes_after"] = current_bytes
     return stats

@@ -15,15 +15,28 @@ def _env_with_passphrase() -> dict[str, str]:
     return env
 
 
+def _is_missing_repo_error(stderr: str) -> bool:
+    return "no repository found at" in stderr.lower()
+
+
 def _run(vykar_bin: str, config_path: str, args: list[str], *,
-         timeout: int = 120, label: str = "") -> subprocess.CompletedProcess:
+         timeout: int = 120, label: str = "",
+         allow_missing_repo: bool = False) -> subprocess.CompletedProcess:
     cmd = [vykar_bin, "--config", config_path] + args
     result = subprocess.run(cmd, capture_output=True, text=True,
                             env=_env_with_passphrase(), timeout=timeout)
-    if result.returncode != 0:
+    missing_repo = allow_missing_repo and _is_missing_repo_error(result.stderr)
+    if result.returncode != 0 and not missing_repo:
         print(f"[vykar {label or ' '.join(args)}] FAILED (rc={result.returncode})", file=sys.stderr)
         if result.stderr:
             print(result.stderr[-2000:], file=sys.stderr)
+    if missing_repo:
+        return subprocess.CompletedProcess(
+            args=result.args,
+            returncode=0,
+            stdout=result.stdout,
+            stderr=result.stderr,
+        )
     return result
 
 
@@ -35,8 +48,6 @@ def vykar_backup(vykar_bin: str, config_path: str, repo_label: str,
                  snapshot_label: str = "") -> tuple[subprocess.CompletedProcess, str | None]:
     """Run backup, return (result, snapshot_id or None)."""
     args = ["backup", "-R", repo_label]
-    if snapshot_label:
-        args += ["-l", snapshot_label]
     result = _run(vykar_bin, config_path, args, timeout=3600, label="backup")
     snapshot_id = None
     if result.returncode == 0:
@@ -81,4 +92,4 @@ def vykar_delete_repo(vykar_bin: str, config_path: str,
                       repo_label: str) -> subprocess.CompletedProcess:
     return _run(vykar_bin, config_path,
                 ["delete", "-R", repo_label, "--yes-delete-this-repo"],
-                label="delete-repo")
+                label="delete-repo", allow_missing_repo=True)
