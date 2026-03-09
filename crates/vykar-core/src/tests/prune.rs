@@ -179,8 +179,14 @@ fn keep_weekly() {
     // Mon 2024-12-16 = ISO week 51 of 2024
     let snapshots = vec![
         snap_at("w1", Utc.with_ymd_and_hms(2024, 12, 30, 12, 0, 0).unwrap()),
-        snap_at("w52a", Utc.with_ymd_and_hms(2024, 12, 29, 12, 0, 0).unwrap()),
-        snap_at("w52b", Utc.with_ymd_and_hms(2024, 12, 23, 12, 0, 0).unwrap()),
+        snap_at(
+            "w52a",
+            Utc.with_ymd_and_hms(2024, 12, 29, 12, 0, 0).unwrap(),
+        ),
+        snap_at(
+            "w52b",
+            Utc.with_ymd_and_hms(2024, 12, 23, 12, 0, 0).unwrap(),
+        ),
         snap_at("w51", Utc.with_ymd_and_hms(2024, 12, 16, 12, 0, 0).unwrap()),
     ];
 

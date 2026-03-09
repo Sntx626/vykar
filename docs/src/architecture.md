@@ -1,6 +1,6 @@
 # Architecture
 
-Technical reference for vykar's cryptographic, chunking, compression, and storage design decisions.
+Technical reference for vykar's cryptographic, chunking, compression, concurrency, and repository-layout design decisions.
 
 ---
 
@@ -162,6 +162,40 @@ The `snapshot_list` cache is separate: on open/refresh, the client lists `snapsh
 
 The same per-repo cache root is also used as the preferred temp location for intermediate files (e.g. cache rebuilds).
 
+#### Repository And Cache Topology
+
+```mermaid
+flowchart LR
+    subgraph Repo["Repository (authoritative)"]
+        direction TB
+        config["config"]
+        repokey["keys/repokey"]
+        index["index"]
+        indexgen["index.gen"]
+        snapshots["snapshots/‹id›"]
+        packs["packs/‹xx›/‹id›"]
+        sessions["sessions/‹id›.json"]
+        journal["sessions/‹id›.index"]
+        locks["locks/*.json"]
+    end
+
+    subgraph Cache["Local cache (best-effort)"]
+        direction TB
+        filecache["filecache"]
+        snapshotlist["snapshot_list"]
+        dedupcache["dedup_cache"]
+        restorecache["restore_cache"]
+        fullindex["full_index_cache"]
+    end
+
+    index --> dedupcache
+    index --> restorecache
+    index --> fullindex
+    snapshots --> snapshotlist
+    filecache -. reuse .-> index
+    indexgen -. hint .-> index
+```
+
 ### Key Data Structures
 
 **IndexBlob** — the encrypted object stored at the `index` key. It combines the current cache-validity token with the chunk index.
@@ -201,11 +235,22 @@ Each `SnapshotEntry` contains: `name`, `id` (32-byte random), `time`, `source_la
 | username | String | User that ran the backup |
 | time / time_end | DateTime | Backup start and end timestamps |
 | chunker_params | ChunkerConfig | CDC parameters used for this snapshot |
+| comment | String | Optional snapshot comment field; currently written as `""` by backup flows |
 | item_ptrs | Vec\<ChunkId\> | Chunk IDs containing the serialized item stream |
 | stats | SnapshotStats | File count, original/compressed/deduplicated sizes |
 | source_label | String | Config label for the source |
 | source_paths | Vec\<String\> | Directories that were backed up |
-| label | String | User-provided annotation |
+| label | String | Legacy compatibility field; new snapshots currently write `""` |
+
+**SnapshotStats** — per-snapshot counters stored inside `SnapshotMeta.stats`.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| nfiles | u64 | Number of backed-up regular files plus command-dump virtual files |
+| original_size | u64 | Total plaintext bytes before compression/dedup |
+| compressed_size | u64 | Total bytes after compression |
+| deduplicated_size | u64 | Bytes newly stored after deduplication |
+| errors | u64 | Number of soft file-read errors skipped during backup |
 
 **Item** — a single filesystem entry within a snapshot's item stream.
 
@@ -294,9 +339,17 @@ If you raise `max_pack_size`, target size can grow further, up to the 512 MiB ha
 
 The backup runs in two phases so multiple clients can upload concurrently (see [Concurrent Multi-Client Backups](#concurrent-multi-client-backups)).
 
-```text
-── Phase 1: Upload (no exclusive lock) ──
+#### Phase 1: Upload (no exclusive lock)
 
+```mermaid
+flowchart LR
+    register["Register session"] --> recover["Recover journal"]
+    recover --> upload["Upload packs"]
+    upload --> journal["Refresh journal"]
+    journal --> stage["Stage SnapshotMeta"]
+```
+
+```text
 generate session_id (128-bit random hex)
 register_session() → write sessions/<session_id>.json, probe for active lock
 open repo (full index loaded once)
@@ -305,6 +358,10 @@ begin_write_session(session_id) → journal key = sessions/<session_id>.index
   → recover own sessions/<session_id>.index if present (batch-verify packs, promote into dedup structures)
   → enable tiered dedup mode (mmap cache + xor filter, fallback to dedup HashMap)
   → derive upload/pipeline limits from `limits.connections` + `limits.threads`
+  → execute `command_dumps` first:
+    → stream each command's stdout directly into chunk storage
+    → add virtual items under `.vykar-dumps/` to the item stream
+    → abort backup on non-zero exit or timeout
   → walk sources with excludes + one_file_system + exclude_if_present
     → cache-hit path: reuse cached ChunkRefs and bump refs
     → cache-miss path:
@@ -323,9 +380,20 @@ begin_write_session(session_id) → journal key = sessions/<session_id>.index
       → sequential fallback path (effective worker threads == 1)
   → serialize items incrementally into item-stream chunks (tree packs)
   → pack SnapshotMeta in memory (do not write snapshots/<id> yet)
+```
 
-── Phase 2: Commit (exclusive lock, brief) ──
+#### Phase 2: Commit (exclusive lock, brief)
 
+```mermaid
+flowchart LR
+    lock["Acquire lock"] --> refresh["Refresh snapshots"]
+    refresh --> reconcile["Reconcile delta"]
+    reconcile --> persist["Persist index"]
+    persist --> commit["Write snapshot<br/>commit point"]
+    commit --> cleanup["Cleanup + unlock"]
+```
+
+```text
 acquire_lock_with_retry(10 attempts, 500ms base, exponential backoff + jitter)
 commit_concurrent_session():
   → flush packs/pending uploads (pack flush triggers: target size, 10,000 blobs, or 300s age)
@@ -347,9 +415,11 @@ commit_concurrent_session():
 deregister_session() → delete sessions/<session_id>.json (while holding lock)
 release_lock()
 clear sessions/<session_id>.index
+```
 
-── Error Paths ──
+#### Error Paths
 
+```text
   → on VykarError::Interrupted (Ctrl-C):
     → flush_on_abort(): seal partial packs, join upload threads, write final sessions/<id>.index
     → deregister_session(), release advisory lock, exit code 130
@@ -358,9 +428,26 @@ clear sessions/<session_id>.index
     → exit code 3 (partial success) if any files were skipped
 ```
 
-Unreadable listed snapshot blobs are warned and skipped during snapshot-list refresh. Snapshot names are only available after successful decrypt + deserialize, so the implementation chooses availability over failing all future opens or commits in append-only mode.
+Snapshot refresh uses two modes:
+- `open()` uses resilient refresh: listed-but-missing snapshots and GET failures are warned and skipped
+- commit-time refresh uses strict I/O: listed-but-missing snapshots and GET failures abort the commit so a transient error cannot hide an existing snapshot name
+
+Decrypt and deserialize failures are warned and skipped in both modes. Snapshot names are only available after successful decrypt + deserialize, so the implementation chooses availability over letting one garbage blob brick all future opens or commits in append-only mode.
 
 ### Restore Pipeline
+
+```mermaid
+flowchart LR
+    open["Open repo<br/>no index"] --> resolve["Resolve snapshot"]
+    resolve --> cache{"Restore cache<br/>valid?"}
+    cache -- yes --> items1["Load items<br/>via cache"]
+    cache -- no --> items2["Load full index<br/>+ items"]
+    items1 --> decode["Stream-decode<br/>two passes"]
+    items2 --> decode
+    decode --> plan["Plan coalesced<br/>read groups"]
+    plan --> read["Parallel reads<br/>decrypt + write"]
+    read --> meta["Restore metadata"]
+```
 
 ```text
 open repository without index (`open_without_index`)
@@ -389,6 +476,8 @@ Snapshot metadata (the list of files, directories, and symlinks) is **not** stor
 3. The resulting `ChunkId` values are collected into `item_ptrs` in the `SnapshotMeta`
 
 This design means the item stream benefits from deduplication — if most files are unchanged between backups, the item-stream chunks are mostly identical and deduplicated away.
+
+Command dumps participate in this same item stream. A source with `command_dumps` produces a synthetic `.vykar-dumps/` directory entry plus one regular-file `Item` per dump, so restores treat dump output like ordinary files.
 
 Restore now also consumes item streams incrementally (streaming deserialization) instead of materializing full `Vec<Item>` state up front.
 When the mmap restore cache is valid, item-stream chunk lookups can avoid loading the full chunk index. File-data read-group planning still uses the full index after planning, avoiding unrecoverable stale-location failures.
@@ -447,6 +536,7 @@ Two-stage signal handling applies to all commands:
 - **Scheduling**: sleep-loop with configurable interval (`schedule.every`, e.g. `"6h"`) or cron expression (`schedule.cron`, e.g. `"0 3 * * *"`). Optional random jitter (`jitter_seconds`) spreads load across hosts.
 - **Cycle**: `backup → prune → compact → check` per repo, sequential. Shutdown flag checked between steps.
 - **Passphrase**: daemon validates at startup that all encrypted repos have a non-interactive passphrase source (`passcommand`, `passphrase`, or `VYKAR_PASSPHRASE` env). Cannot prompt interactively.
+- **Scheduler lock**: daemon and GUI share a process-wide scheduler lock under the local config directory so only one scheduler is active at a time. On Unix this uses `flock(2)` and is released automatically on process exit; on Windows the current implementation fails open if file locking is unavailable.
 
 Configuration:
 ```yaml
@@ -461,6 +551,17 @@ schedule:
 ### Refcount Lifecycle
 
 Chunk refcounts track how many snapshots reference each chunk, driving the dedup → delete → compact lifecycle:
+
+```mermaid
+flowchart TD
+    backup["Backup<br/>new chunk or dedup hit"] --> refs["ChunkIndex refcount updated"]
+    refs --> delete["Delete / prune<br/>remove snapshot first"]
+    delete --> zero["Refcount reaches 0<br/>index entry removed"]
+    delete -. crash here .-> inflated["Inflated refcounts<br/>safe, space not reclaimed yet"]
+    zero --> orphan["Dead bytes remain in pack files"]
+    orphan --> compact["Compact rewrites or deletes packs"]
+    compact --> reclaimed["Space reclaimed"]
+```
 
 1. **Backup** — `store_chunk()` adds a new entry with refcount=1, or increments an existing entry's refcount on dedup hit
 2. **Delete / Prune** — delete `snapshots/<id>` first, then decrement chunk refs in the index and save it
@@ -516,6 +617,25 @@ After `delete` or `prune`, chunk refcounts are decremented and entries with refc
 
 #### Algorithm
 
+```mermaid
+flowchart TB
+    subgraph Phase1["Phase 1: Analysis (read-only)"]
+        direction LR
+        enum["Enumerate packs"] --> size["Query pack sizes"]
+        size --> live["Compute live/dead bytes"]
+        live --> filter["Filter by threshold"]
+    end
+
+    subgraph Phase2["Phase 2: Repack"]
+        direction LR
+        repack["Read live blobs"] --> write["Write new pack"]
+        write --> save["Save index"]
+        save --> delete["Delete old pack"]
+    end
+
+    Phase1 --> Phase2
+```
+
 **Phase 1 — Analysis (read-only, no pack downloads):**
 1. Enumerate all pack files across 256 shard dirs (`packs/00/` through `packs/ff/`)
 2. Query each pack's size via metadata-only calls (`HEAD`/stat), parallelized from `limits.connections` (remote: `min(connections*3, 24)`, local: `min(connections, 8)`)
@@ -537,7 +657,7 @@ For each candidate pack (most wasteful first, respecting `--max-repack-size` cap
 
 #### Crash Safety
 
-The index never points to a deleted pack. Sequence: write new pack → save index → delete old pack. A crash between steps leaves an orphan old pack (harmless, cleaned up on next compact).
+The crash-safety invariant is visible in the Phase 2 ordering above: the index never points to a deleted pack. Sequence: write new pack → save index → delete old pack. A crash between steps leaves an orphan old pack (harmless, cleaned up on next compact).
 
 #### CLI
 
@@ -550,6 +670,15 @@ vykar compact [--threshold N] [--max-repack-size 2G] [-n/--dry-run]
 ## Parallel Pipeline
 
 Backup uses a bounded pipeline:
+
+```mermaid
+flowchart LR
+    walk["Walk<br/>(sequential)"] --> workers["Workers ×N<br/>read / chunk / hash"]
+    workers --> consumer["Consumer<br/>(sequential)<br/>dedup + commit"]
+    consumer --> uploads["Uploads<br/>bounded concurrency"]
+    budget["ByteBudget"] -. caps in-flight bytes .-> workers
+    budget -. caps in-flight bytes .-> consumer
+```
 
 1. Sequential walk stage emits file work
 2. Parallel workers in a crossbeam-channel pipeline read/chunk/hash files and classify chunks (hash-only vs prepacked)
@@ -575,19 +704,3 @@ Internal backup pipeline knobs are derived automatically:
 - `pipeline_depth = max(connections, 2)`
 - `pipeline_buffer_bytes = clamp(threads_effective * 64 MiB, 64 MiB..1 GiB)`
 - `segment_size = 64 MiB`, `transform_batch = 32 MiB`, `max_pending_actions = 8192`
-
----
-
-## Why This Is Notable for Backup Tools
-
-Deduplicating backup tools are often dominated by index memory and restore-planning overhead at large chunk counts. vykar's implemented architecture addresses that class of bottlenecks with:
-
-- Tiered dedup lookups (session map + xor filter + mmap cache) instead of always materializing a full in-memory index during backup
-- Pending-index journal for crash recovery — interrupted backups resume without re-uploading flushed packs
-- Restore-cache-first item-stream lookup, with full-index read-group planning for predictable fallback behavior
-- Authenticated `IndexBlob` generation plus advisory `index.gen` for safe local cache validation
-- Local snapshot-list cache to avoid O(n) snapshot metadata GETs on every open
-- Explicitly bounded backup pipeline memory and bounded in-flight uploads derived from a small public limits surface
-- Concurrent multi-client backup protocol where only the brief commit phase requires an exclusive lock — upload phases run in parallel across all clients
-
-These optimizations are implementation choices in current vykar, not future roadmap items.

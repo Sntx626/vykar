@@ -47,3 +47,28 @@ jobs:
 
       - name: Run tests
         run: make test-all
+
+  docs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_TERM_COLOR: always
+      MDBOOK_VERSION: 0.5.2
+      MDBOOK_MERMAID_VERSION: 0.17.0
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: docs
+          cache-on-failure: true
+
+      - name: Install docs toolchain
+        run: |
+          cargo install --locked --version "${MDBOOK_VERSION}" mdbook
+          cargo install --locked --version "${MDBOOK_MERMAID_VERSION}" mdbook-mermaid
+
+      - name: Build docs
+        run: make docs-build

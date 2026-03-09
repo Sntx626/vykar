@@ -566,7 +566,13 @@ mod index_delta {
     /// Generate a fresh ChunkIndex with 0..30 entries, refcount 1..5 each.
     fn arb_fresh_index() -> impl Strategy<Value = (ChunkIndex, Vec<(ChunkId, u32)>)> {
         prop::collection::vec(
-            (arb_chunk_id(), 1..5u32, 1..16_777_216u32, arb_pack_id(), 0..u32::MAX as u64),
+            (
+                arb_chunk_id(),
+                1..5u32,
+                1..16_777_216u32,
+                arb_pack_id(),
+                0..u32::MAX as u64,
+            ),
             0..30,
         )
         .prop_map(|entries| {
@@ -617,17 +623,20 @@ mod index_delta {
         let fresh_ids_for_bumps = fresh_ids;
 
         // Non-overlapping new entries (fresh IDs that don't exist in fresh index)
-        let non_overlap = prop::collection::vec(
-            arb_chunk_id().prop_flat_map(arb_new_chunk_entry),
-            0..10,
-        );
+        let non_overlap =
+            prop::collection::vec(arb_chunk_id().prop_flat_map(arb_new_chunk_entry), 0..10);
 
         // Overlapping new entries (subset of fresh_ids)
         let overlap = if fresh_ids_for_overlap.is_empty() {
             Just(vec![]).boxed()
         } else {
             prop::collection::vec(
-                (0..fresh_ids_for_overlap.len(), 1..5u32, arb_pack_id(), 0..u32::MAX as u64)
+                (
+                    0..fresh_ids_for_overlap.len(),
+                    1..5u32,
+                    arb_pack_id(),
+                    0..u32::MAX as u64,
+                )
                     .prop_map(move |(idx, refcount, pack_id, pack_offset)| {
                         let idx = idx % fresh_ids_for_overlap.len();
                         NewChunkEntry {
@@ -680,8 +689,12 @@ mod index_delta {
                     .boxed()
                 };
 
-                (Just(all_entries_clone), Just(fresh_bumps.clone()), session_bumps).prop_map(
-                    move |(new_entries, fb, sb)| {
+                (
+                    Just(all_entries_clone),
+                    Just(fresh_bumps.clone()),
+                    session_bumps,
+                )
+                    .prop_map(move |(new_entries, fb, sb)| {
                         let mut combined_bumps = fb;
                         for (id, count) in &sb {
                             *combined_bumps.entry(*id).or_insert(0) += count;
@@ -691,8 +704,7 @@ mod index_delta {
                             refcount_bumps: combined_bumps.clone(),
                         };
                         (delta, new_entries, combined_bumps)
-                    },
-                )
+                    })
             },
         )
     }

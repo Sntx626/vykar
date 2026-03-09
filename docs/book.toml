@@ -14,4 +14,9 @@ git-repository-url = "https://github.com/borgbase/vykar"
 # mdBook links chapters as .html files; this shim normalizes active-page
 # matching so current-page headers still appear in sidebar navigation.
 additional-css = ["custom.css"]
-additional-js = ["path-normalize.js"]
+additional-js = ["path-normalize.js", "mermaid.min.js", "mermaid-init.js"]
+
+[preprocessor]
+
+[preprocessor.mermaid]
+command = "mdbook-mermaid"

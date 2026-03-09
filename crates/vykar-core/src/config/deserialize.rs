@@ -309,10 +309,7 @@ mod tests {
     #[derive(Debug, Deserialize)]
     #[allow(dead_code)]
     struct OptionalVecStrictStringTest {
-        #[serde(
-            default,
-            deserialize_with = "deserialize_optional_vec_strict_string"
-        )]
+        #[serde(default, deserialize_with = "deserialize_optional_vec_strict_string")]
         value: Option<Vec<String>>,
     }
 
@@ -329,8 +326,7 @@ mod tests {
 
     #[test]
     fn optional_strict_string_accepts_string() {
-        let result: OptionalStrictStringTest =
-            serde_yaml::from_str("value: \"hello\"").unwrap();
+        let result: OptionalStrictStringTest = serde_yaml::from_str("value: \"hello\"").unwrap();
         assert_eq!(result.value, Some("hello".to_string()));
     }
 
@@ -369,8 +365,7 @@ mod tests {
 
     #[test]
     fn optional_duration_string_accepts_int() {
-        let result: OptionalDurationStringTest =
-            serde_yaml::from_str("value: 42").unwrap();
+        let result: OptionalDurationStringTest = serde_yaml::from_str("value: 42").unwrap();
         assert_eq!(result.value, Some("42".to_string()));
     }
 

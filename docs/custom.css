@@ -63,3 +63,16 @@ h1#command-reference + table td:first-child {
   width: 35%;
   white-space: nowrap;
 }
+
+/* Mermaid diagrams: keep them compact and responsive inside mdBook content. */
+.mermaid {
+  margin: 1rem 0;
+  overflow-x: auto;
+}
+
+.mermaid svg {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 0 auto;
+}
