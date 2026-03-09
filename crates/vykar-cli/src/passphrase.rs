@@ -76,9 +76,11 @@ pub(crate) fn get_init_passphrase(
         return Ok(None);
     }
     if let Some(pass) = configured_passphrase(config)? {
-        tracing::warn!(
-            "using plaintext encryption.passphrase from config; prefer encryption.passcommand or VYKAR_PASSPHRASE"
-        );
+        if config.encryption.passphrase.is_some() {
+            tracing::warn!(
+                "using plaintext encryption.passphrase from config; prefer encryption.passcommand or VYKAR_PASSPHRASE"
+            );
+        }
         return Ok(Some(pass));
     }
 
