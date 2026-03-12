@@ -1,6 +1,7 @@
 use std::io::Read;
 use std::time::Duration;
 
+use percent_encoding::percent_decode_str;
 use rusty_s3::actions::{ListObjectsV2, S3Action};
 use rusty_s3::{Bucket, Credentials, UrlStyle};
 
@@ -220,7 +221,13 @@ impl StorageBackend for S3Backend {
                 .map_err(|e| VykarError::Other(format!("S3 LIST {prefix}: {e}")))?;
 
             for obj in &parsed.contents {
-                let key = &obj.key;
+                // rusty_s3 sends encoding-type=url; some S3-compatible backends
+                // (e.g. Garage) URL-encode keys in the response. Decode here —
+                // for backends that don't encode, this is a no-op.
+                let key = percent_decode_str(&obj.key)
+                    .decode_utf8()
+                    .map_err(|e| VykarError::Other(format!("S3 LIST: invalid UTF-8 in key: {e}")))?
+                    .into_owned();
                 // Skip directory markers
                 if key.ends_with('/') {
                     continue;
@@ -229,7 +236,7 @@ impl StorageBackend for S3Backend {
                 if root_prefix_len > 0 && key.len() > root_prefix_len {
                     keys.push(key[root_prefix_len..].to_string());
                 } else {
-                    keys.push(key.clone());
+                    keys.push(key);
                 }
             }
 

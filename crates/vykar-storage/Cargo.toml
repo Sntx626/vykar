@@ -23,6 +23,7 @@ rand.workspace = true
 
 # URL parsing
 url = "2"
+percent-encoding = "2"
 
 # HTTP client (S3 + REST backends)
 rusty-s3 = "0.8"

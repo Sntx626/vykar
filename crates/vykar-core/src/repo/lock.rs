@@ -66,35 +66,18 @@ pub fn acquire_lock(storage: &dyn StorageBackend) -> Result<LockGuard> {
 
     // Determine lock winner deterministically: oldest key wins.
     let mut keys = list_lock_keys(storage)?;
-    // S3-compatible backends may not return a just-written key immediately
-    // (eventual consistency on LIST). Retry for the SAME key — this is
-    // strictly better than the outer acquire_lock_with_retry loop, which
-    // writes a fresh key each attempt and resets the consistency window.
+    keys.sort();
     if !keys.contains(&key) {
-        for attempt in 1..=5 {
-            std::thread::sleep(std::time::Duration::from_millis(1000));
-            debug!(attempt, lock_key = %key, "lock key not visible in listing, retrying");
-            keys = list_lock_keys(storage)?;
-            if keys.contains(&key) {
-                break;
-            }
-        }
-    }
-
-    if !keys.contains(&key) {
+        // PUT succeeded but LIST doesn't include our key — storage-layer bug
+        // or an unsupported eventual-consistency model. Clean up and fail.
         let _ = storage.delete(&key);
         return Err(VykarError::Other(
-            "lock acquisition failed: written lock key not visible in listing \
-             (storage may have eventual consistency); try again"
-                .into(),
+            "lock acquisition failed: written lock key not returned by LIST".into(),
         ));
     }
-
-    keys.sort();
     if keys.first() != Some(&key) {
         let _ = storage.delete(&key);
-        let winner_key = keys.first().unwrap(); // safe: our key is in keys
-        let holder = format_lock_holder(storage, winner_key);
+        let holder = format_lock_holder(storage, keys.first().unwrap());
         return Err(VykarError::Locked(holder));
     }
 

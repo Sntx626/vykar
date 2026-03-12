@@ -7364,6 +7364,7 @@ dependencies = [
  "blake2",
  "hex",
  "nix 0.29.0",
+ "percent-encoding",
  "rand 0.8.5",
  "russh",
  "russh-sftp",
