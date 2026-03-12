@@ -1132,6 +1132,7 @@ enum UiEvent {
     OperationFinished,
     Quit,
     ShowWindow,
+    TriggerSnapshotRefresh,
 }
 
 // ── Scheduler ──
@@ -1800,9 +1801,7 @@ fn run_worker(
                 }
 
                 if any_snapshots_created {
-                    let _ = app_tx.send(AppCommand::RefreshSnapshots {
-                        repo_selector: String::new(),
-                    });
+                    let _ = ui_tx.send(UiEvent::TriggerSnapshotRefresh);
                 }
 
                 backup_running.store(false, Ordering::SeqCst);
@@ -1971,9 +1970,7 @@ fn run_worker(
                         format!("No repositories found with source '{source_label}'."),
                     );
                 } else {
-                    let _ = app_tx.send(AppCommand::RefreshSnapshots {
-                        repo_selector: String::new(),
-                    });
+                    let _ = ui_tx.send(UiEvent::TriggerSnapshotRefresh);
                 }
 
                 backup_running.store(false, Ordering::SeqCst);
@@ -3175,6 +3172,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 NSApplication::sharedApplication(mtm).activate();
                             }
                         }
+                    }
+                    UiEvent::TriggerSnapshotRefresh => {
+                        let sel = ui.get_snapshots_repo_combo_value().to_string();
+                        let _ = app_tx.send(AppCommand::RefreshSnapshots { repo_selector: sel });
                     }
                 }
             });
