@@ -1,9 +1,10 @@
 use crate::repo::lock::{
     acquire_lock, break_lock, cleanup_stale_sessions, clear_all_sessions, release_lock,
 };
-use crate::testutil::MemoryBackend;
+use crate::testutil::{EventuallyConsistentBackend, MemoryBackend};
 use chrono::{Duration, Utc};
 use vykar_storage::StorageBackend;
+use vykar_types::error::VykarError;
 
 /// Stub pid_alive function that always returns true (conservative default).
 fn pid_always_alive(_pid: u32) -> bool {
@@ -341,4 +342,70 @@ fn clear_all_sessions_returns_zero_when_empty() {
     let storage = MemoryBackend::new();
     let removed = clear_all_sessions(&storage).unwrap();
     assert_eq!(removed, 0);
+}
+
+// --- Lock display and S3 eventual consistency tests ---
+
+#[test]
+fn lock_contention_shows_hostname_and_pid() {
+    let storage = MemoryBackend::new();
+    let first = acquire_lock(&storage).unwrap();
+
+    let second = acquire_lock(&storage);
+    assert!(second.is_err());
+    let err = second.unwrap_err();
+    let msg = err.to_string();
+    // Should contain hostname and PID, not a raw key path.
+    assert!(
+        msg.contains("PID"),
+        "error should contain hostname/PID, got: {msg}"
+    );
+    assert!(
+        !msg.contains("locks/"),
+        "error should not contain raw key path, got: {msg}"
+    );
+
+    release_lock(&storage, first).unwrap();
+}
+
+#[test]
+fn acquire_lock_succeeds_after_list_retry() {
+    // Keys hidden for 2 list calls — the inner retry loop should catch up.
+    let storage = EventuallyConsistentBackend::new(2);
+    let guard = acquire_lock(&storage);
+    assert!(
+        guard.is_ok(),
+        "should succeed after retry, got: {:?}",
+        guard.err()
+    );
+    release_lock(&storage, guard.unwrap()).unwrap();
+}
+
+#[test]
+fn acquire_lock_fails_with_persistent_inconsistency() {
+    // Keys hidden for 100 list calls — far exceeds the 5-retry budget.
+    let storage = EventuallyConsistentBackend::new(100);
+    let result = acquire_lock(&storage);
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+
+    // Should be VykarError::Other, not Locked.
+    assert!(
+        matches!(&err, VykarError::Other(_)),
+        "expected VykarError::Other, got: {err:?}"
+    );
+    let msg = err.to_string();
+    assert!(
+        msg.contains("not visible"),
+        "error should mention visibility, got: {msg}"
+    );
+
+    // The written lock key should have been cleaned up.
+    // Use inner_list() to bypass eventual-consistency hiding — list() would
+    // return empty regardless since the hide counter is still positive.
+    let remaining_locks = storage.inner_list("locks/").unwrap();
+    assert!(
+        remaining_locks.is_empty(),
+        "stale lock key should be cleaned up, found: {remaining_locks:?}"
+    );
 }

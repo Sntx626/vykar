@@ -66,14 +66,35 @@ pub fn acquire_lock(storage: &dyn StorageBackend) -> Result<LockGuard> {
 
     // Determine lock winner deterministically: oldest key wins.
     let mut keys = list_lock_keys(storage)?;
+    // S3-compatible backends may not return a just-written key immediately
+    // (eventual consistency on LIST). Retry for the SAME key — this is
+    // strictly better than the outer acquire_lock_with_retry loop, which
+    // writes a fresh key each attempt and resets the consistency window.
+    if !keys.contains(&key) {
+        for attempt in 1..=5 {
+            std::thread::sleep(std::time::Duration::from_millis(1000));
+            debug!(attempt, lock_key = %key, "lock key not visible in listing, retrying");
+            keys = list_lock_keys(storage)?;
+            if keys.contains(&key) {
+                break;
+            }
+        }
+    }
+
+    if !keys.contains(&key) {
+        let _ = storage.delete(&key);
+        return Err(VykarError::Other(
+            "lock acquisition failed: written lock key not visible in listing \
+             (storage may have eventual consistency); try again"
+                .into(),
+        ));
+    }
+
     keys.sort();
     if keys.first() != Some(&key) {
-        // Best-effort cleanup of the lock we just wrote.
         let _ = storage.delete(&key);
-        let holder = keys
-            .first()
-            .cloned()
-            .unwrap_or_else(|| "unknown".to_string());
+        let winner_key = keys.first().unwrap(); // safe: our key is in keys
+        let holder = format_lock_holder(storage, winner_key);
         return Err(VykarError::Locked(holder));
     }
 
@@ -108,6 +129,17 @@ fn list_lock_keys(storage: &dyn StorageBackend) -> Result<Vec<String>> {
     let mut keys = storage.list(LOCKS_PREFIX)?;
     keys.retain(|k| k.starts_with(LOCKS_PREFIX) && k.ends_with(".json"));
     Ok(keys)
+}
+
+fn format_lock_holder(storage: &dyn StorageBackend, lock_key: &str) -> String {
+    let fallback = lock_key.to_string();
+    let Some(data) = storage.get(lock_key).ok().flatten() else {
+        return fallback;
+    };
+    let Ok(entry) = serde_json::from_slice::<LockEntry>(&data) else {
+        return fallback;
+    };
+    format!("{} (PID {})", entry.hostname, entry.pid)
 }
 
 fn cleanup_stale_locks(storage: &dyn StorageBackend, max_age: Duration) -> Result<()> {

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use std::sync::Once;
 
@@ -195,5 +195,90 @@ impl StorageBackend for RecordingBackend {
     fn put_owned(&self, key: &str, data: Vec<u8>) -> Result<()> {
         self.log.record(key);
         self.inner.put(key, &data)
+    }
+}
+
+/// Storage wrapper that simulates S3-style eventual consistency on LIST.
+///
+/// Keys written via `put()` are hidden from `list()` for the first N calls
+/// (configurable `hide_count`). After N list calls that would have returned
+/// the key, the key becomes visible. All other operations (`get`, `exists`,
+/// `delete`) are immediately consistent.
+pub struct EventuallyConsistentBackend {
+    inner: MemoryBackend,
+    /// Keys recently written via `put()` that are still hidden from `list()`.
+    /// Maps key -> remaining hide count.
+    hidden: Mutex<HashMap<String, usize>>,
+    /// How many `list()` calls a newly written key is hidden for.
+    hide_count: usize,
+}
+
+impl EventuallyConsistentBackend {
+    pub fn new(hide_count: usize) -> Self {
+        Self {
+            inner: MemoryBackend::new(),
+            hidden: Mutex::new(HashMap::new()),
+            hide_count,
+        }
+    }
+
+    /// List keys from the inner backend, bypassing eventual-consistency hiding.
+    pub fn inner_list(&self, prefix: &str) -> Result<Vec<String>> {
+        self.inner.list(prefix)
+    }
+}
+
+impl StorageBackend for EventuallyConsistentBackend {
+    fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        self.inner.get(key)
+    }
+
+    fn put(&self, key: &str, data: &[u8]) -> Result<()> {
+        self.inner.put(key, data)?;
+        let mut hidden = self.hidden.lock().unwrap();
+        hidden.insert(key.to_string(), self.hide_count);
+        Ok(())
+    }
+
+    fn delete(&self, key: &str) -> Result<()> {
+        let mut hidden = self.hidden.lock().unwrap();
+        hidden.remove(key);
+        self.inner.delete(key)
+    }
+
+    fn exists(&self, key: &str) -> Result<bool> {
+        self.inner.exists(key)
+    }
+
+    fn list(&self, prefix: &str) -> Result<Vec<String>> {
+        let all_keys = self.inner.list(prefix)?;
+        let mut hidden = self.hidden.lock().unwrap();
+
+        // Determine which keys are still hidden vs newly visible.
+        let still_hidden: HashSet<String> = hidden
+            .iter()
+            .filter(|(_, count)| **count > 0)
+            .map(|(k, _)| k.clone())
+            .collect();
+
+        // Decrement counters for keys matching this prefix.
+        for (key, count) in hidden.iter_mut() {
+            if key.starts_with(prefix) && *count > 0 {
+                *count -= 1;
+            }
+        }
+
+        Ok(all_keys
+            .into_iter()
+            .filter(|k| !still_hidden.contains(k))
+            .collect())
+    }
+
+    fn get_range(&self, key: &str, offset: u64, length: u64) -> Result<Option<Vec<u8>>> {
+        self.inner.get_range(key, offset, length)
+    }
+
+    fn create_dir(&self, key: &str) -> Result<()> {
+        self.inner.create_dir(key)
     }
 }
