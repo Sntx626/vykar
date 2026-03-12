@@ -1,6 +1,6 @@
 FROM alpine:3.21
 
-RUN apk add --no-cache ca-certificates tzdata
+RUN apk add --no-cache ca-certificates tzdata curl jq bash
 
 ARG TARGETPLATFORM
 COPY bin/${TARGETPLATFORM}/vykar /usr/local/bin/vykar

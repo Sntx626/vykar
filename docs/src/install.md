@@ -99,6 +99,11 @@ The daemon logs whether the reload succeeded or was rejected (invalid config).
 - Mount source directories under `/data/` and reference them as `/data/...` in the config
 - For encryption, use `VYKAR_PASSPHRASE` env var or Docker secrets via `passcommand: "cat /run/secrets/vykar_passphrase"`
 - Use a named volume for `/cache` to persist the snapshot cache across restarts
+- The image includes `curl`, `jq`, and `bash` for use in [hooks](configuration.md#hooks) (e.g. monitoring webhooks, JSON payloads). For additional tools, extend the image:
+      ```dockerfile
+      FROM ghcr.io/borgbase/vykar
+      RUN apk add --no-cache sqlite
+      ```
 - Available for `linux/amd64` and `linux/arm64`
 
 
