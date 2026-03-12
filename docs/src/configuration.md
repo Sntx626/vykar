@@ -263,44 +263,22 @@ chunker:                             # Optional, defaults shown
 
 Vykar uses [gitignore-style](https://git-scm.com/docs/gitignore#_pattern_format) patterns for file exclusion. Patterns can be set globally (`exclude_patterns`) or per-source (`exclude`); both lists are merged at runtime.
 
-> **Important:** Patterns are matched against paths **relative to each source directory**, not against absolute filesystem paths. An absolute path like `/home/user/videos/TV` will not work — it is interpreted as the gitignore-anchored glob `home/user/videos/TV` relative to the source root, which matches nothing.
+### Basic patterns
 
-### Pattern syntax quick reference
-
-| Pattern | Matches | Notes |
-|---------|---------|-------|
-| `*.tmp` | Any `.tmp` file at any depth | No `/` in pattern, so `**/` is implied |
-| `*.log` | Any `.log` file at any depth | Same floating match behavior |
-| `.cache/` | Any directory named `.cache` (at any depth) | Trailing `/` restricts to directories |
-| `.cache/**` | All files and dirs inside `.cache` | Does not exclude `.cache` dir itself |
-| `/Downloads` | `Downloads` only at the source root | Leading `/` anchors to the source root |
-| `/build/output` | `build/output` only at the source root | Anchored multi-component path |
-| `TV` | Any file or directory named `TV` at any depth | Floating match (no `/` in pattern) |
-| `logs/debug` | `logs/debug` only at the source root | Contains `/`, so anchored (same as `/logs/debug`) |
-| `!important.log` | Re-include `important.log` (override earlier exclude) | Negation (order-dependent) |
-
-Key rules:
-
-- **No slash in the pattern** (e.g., `*.tmp`, `TV`): matches at any depth, as if prefixed with `**/`.
-- **Slash in the pattern** (e.g., `logs/debug`, `/Downloads`): anchored to the source root. A leading `/` is optional — `logs/debug` and `/logs/debug` behave the same way. This is **not** a filesystem absolute path.
-- **Trailing `/`** (e.g., `.cache/`): only matches directories.
-- **`!` prefix**: negates a previous exclude (re-includes the file).
-
-### Examples
-
-**Global excludes** apply to every source directory:
+Wildcards and exact names match at any depth within a source:
 
 ```yaml
+# Global excludes — apply to every source directory
 exclude_patterns:
-  - "*.tmp"
-  - "*.log"
-  - ".cache/"
-  - "__pycache__/"
-  - ".DS_Store"
+  - "*.tmp"              # any .tmp file, at any depth
+  - "*.log"              # any .log file, at any depth
+  - ".cache/"            # any directory named .cache (trailing / = dirs only)
+  - "__pycache__/"       # same — directories only
+  - ".DS_Store"          # exact filename, any depth
   - "Thumbs.db"
 ```
 
-**Per-source excludes** let you target specific subdirectories within a source:
+Per-source excludes target specific paths within a single source:
 
 ```yaml
 sources:
@@ -315,39 +293,49 @@ sources:
 
 Per-source `exclude` patterns are added after global `exclude_patterns`. Both lists use the same matching rules.
 
-### Common mistakes
+### Anchoring and depth
 
-**Absolute filesystem paths do not work as exclude patterns:**
+Where a pattern matches depends on whether it contains a `/`:
+
+- **No slash** (e.g., `*.tmp`, `TV`): matches at any depth, as if prefixed with `**/`.
+- **Contains a slash** (e.g., `logs/debug`, `/Downloads`): anchored to the source root. A leading `/` is optional — `logs/debug` and `/logs/debug` behave identically.
+- **Trailing `/`** (e.g., `.cache/`): only matches directories.
+
+> **Important:** Patterns are matched against paths **relative to each source directory**, not against absolute filesystem paths. An absolute path like `/home/user/videos/TV` will not work — use per-source `exclude` with relative paths instead:
+>
+> ```yaml
+> # WRONG — silently excludes nothing
+> exclude_patterns:
+>   - "/home/user/videos/TV"
+>
+> # CORRECT — anchored to the source root
+> sources:
+>   - path: "/home/user/videos"
+>     exclude:
+>       - "/TV"
+> ```
+
+### Negation (re-including files)
+
+The `!` prefix overrides an earlier exclude, re-including the matched file or directory:
 
 ```yaml
-# WRONG — these will silently exclude nothing
 exclude_patterns:
-  - "/home/user/videos/TV"
-  - "/home/user/photos/thumbnails"
+  - "*.log"
+  - "!important.log"       # keep important.log despite the *.log rule
 ```
 
-Instead, use per-source excludes with paths relative to the source root:
+**Limitation:** a negation cannot re-include a file if its parent directory was already excluded. The excluded directory is never traversed, so patterns for files inside it are never evaluated. To work around this, re-include each parent directory explicitly:
 
 ```yaml
-# CORRECT — use per-source excludes anchored to the source root
-sources:
-  - path: "/home/user/videos"
-    exclude:
-      - "/TV"
-  - path: "/home/user/photos"
-    exclude:
-      - "/thumbnails"
-```
-
-Or, if you want a global pattern that matches in any source (e.g., skip all directories named `TV` regardless of which source they are in):
-
-```yaml
-# Matches "TV" directory inside any source
 exclude_patterns:
-  - "TV/"
+  - "log*"                 # excludes logfiles/, logs/, logfile.log, etc.
+  - "!logfiles/"           # re-include the directory so it is traversed
+  - "!logfiles/logs/"      # same for the nested directory
+  - "!logfile.log"         # now this re-includes matching files inside
 ```
 
-### Marker-based and filesystem exclusion
+### Other exclusion methods
 
 ```yaml
 exclude_if_present:                  # Skip dirs containing any marker file
