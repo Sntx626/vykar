@@ -176,7 +176,10 @@ fn run_backup_cycle(repos: &[ResolvedRepo]) {
         let name = repo.label.as_deref().unwrap_or(&repo.config.repository.url);
         let multi = repos.len() > 1;
         if multi {
-            eprintln!("--- Repository: {name} ---");
+            eprintln!("=== Repository: {name} ===");
+            if repo.label.is_some() {
+                eprintln!("url: {}", repo.config.repository.url);
+            }
         }
 
         let label = repo.label.as_deref();
