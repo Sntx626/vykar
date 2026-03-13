@@ -429,6 +429,7 @@ slint::slint! {
         in-out property <string> status_text: "Ready";
         in-out property <string> selection_text: "";
         in-out property <[TreeRowData]> tree_rows: [];
+        in-out property <bool> busy: false;
 
         callback toggle_expanded(/* node_index */ int);
         callback toggle_checked(/* node_index */ int);
@@ -465,10 +466,10 @@ slint::slint! {
             // Toolbar
             HorizontalBox {
                 spacing: 8px;
-                Button { text: "Expand All"; clicked => { root.expand_all_clicked(); } }
-                Button { text: "Collapse All"; clicked => { root.collapse_all_clicked(); } }
-                Button { text: "Select All"; clicked => { root.select_all_clicked(); } }
-                Button { text: "Deselect All"; clicked => { root.deselect_all_clicked(); } }
+                Button { text: "Expand All"; enabled: !root.busy; clicked => { root.expand_all_clicked(); } }
+                Button { text: "Collapse All"; enabled: !root.busy; clicked => { root.collapse_all_clicked(); } }
+                Button { text: "Select All"; enabled: !root.busy; clicked => { root.select_all_clicked(); } }
+                Button { text: "Deselect All"; enabled: !root.busy; clicked => { root.deselect_all_clicked(); } }
                 Rectangle { horizontal-stretch: 1; }
                 Text { text: root.selection_text; vertical-alignment: center; color: Palette.foreground; }
             }
@@ -501,6 +502,7 @@ slint::slint! {
                         if row.is_dir: TouchArea {
                             width: 20px;
                             mouse-cursor: pointer;
+                            enabled: !root.busy;
                             clicked => { root.toggle_expanded(row.node_index); }
                             Text {
                                 text: row.expanded ? "v" : ">";
@@ -516,6 +518,7 @@ slint::slint! {
                         TouchArea {
                             width: 22px;
                             mouse-cursor: pointer;
+                            enabled: !root.busy;
                             clicked => { root.toggle_checked(row.node_index); }
                             Rectangle {
                                 x: 2px;
@@ -596,11 +599,12 @@ slint::slint! {
                 }
                 Rectangle { horizontal-stretch: 1; }
                 Button {
-                    text: "Cancel";
+                    text: "Close";
                     clicked => { root.cancel_clicked(); }
                 }
                 Button {
                     text: "Restore Selected";
+                    enabled: !root.busy;
                     clicked => { root.restore_selected_clicked(); }
                 }
             }
@@ -719,6 +723,7 @@ slint::slint! {
 
         // Operation busy state — disables all action buttons
         in-out property <bool> operation_busy: false;
+        in-out property <bool> operation_cancellable: false;
 
         // Repo model (custom cards)
         in-out property <bool> repo_loading: true;
@@ -807,7 +812,8 @@ slint::slint! {
                         text: "Backup, prune, compact, and check all repos";
                         show-left: true;
                         Button {
-                            text: root.operation_busy ? "Cancel" : "Full Backup";
+                            text: root.operation_busy && root.operation_cancellable ? "Cancel" : "Full Backup";
+                            enabled: !root.operation_busy || root.operation_cancellable;
                             primary: !root.operation_busy;
                             clicked => {
                                 if (root.operation_busy) {
@@ -1248,13 +1254,18 @@ enum UiEvent {
     SnapshotContentsData {
         items: Vec<Item>,
     },
-    RestoreStatus(String),
+    RestoreFinished {
+        success: bool,
+        message: String,
+    },
     FindResultsData {
         rows: Vec<FindResultRow>,
     },
     ConfigText(String),
     ConfigSaveError(String),
-    OperationStarted,
+    OperationStarted {
+        cancellable: bool,
+    },
     OperationFinished,
     Quit,
     ShowWindow,
@@ -1897,7 +1908,7 @@ fn run_worker(
             AppCommand::RunBackupAll { scheduled } => {
                 cancel_requested.store(false, Ordering::SeqCst);
                 backup_running.store(true, Ordering::SeqCst);
-                let _ = ui_tx.send(UiEvent::OperationStarted);
+                let _ = ui_tx.send(UiEvent::OperationStarted { cancellable: true });
                 let _ = ui_tx.send(UiEvent::Status(if scheduled {
                     "Running scheduled backup cycle...".to_string()
                 } else {
@@ -2014,7 +2025,7 @@ fn run_worker(
 
                 cancel_requested.store(false, Ordering::SeqCst);
                 backup_running.store(true, Ordering::SeqCst);
-                let _ = ui_tx.send(UiEvent::OperationStarted);
+                let _ = ui_tx.send(UiEvent::OperationStarted { cancellable: true });
                 let rn = format_repo_name(repo);
                 let _ = ui_tx.send(UiEvent::Status(format!("Running backup for [{rn}]...")));
 
@@ -2085,7 +2096,7 @@ fn run_worker(
 
                 cancel_requested.store(false, Ordering::SeqCst);
                 backup_running.store(true, Ordering::SeqCst);
-                let _ = ui_tx.send(UiEvent::OperationStarted);
+                let _ = ui_tx.send(UiEvent::OperationStarted { cancellable: true });
                 let _ = ui_tx.send(UiEvent::Status(format!(
                     "Running backup for source '{source_label}'..."
                 )));
@@ -2507,7 +2518,7 @@ fn run_worker(
                 paths,
             } => {
                 cancel_requested.store(false, Ordering::SeqCst);
-                let _ = ui_tx.send(UiEvent::OperationStarted);
+                let _ = ui_tx.send(UiEvent::OperationStarted { cancellable: false });
                 let _ = ui_tx.send(UiEvent::Status("Restoring selected items...".to_string()));
 
                 match find_repo_for_snapshot(
@@ -2539,19 +2550,32 @@ fn run_worker(
                                         format_bytes(stats.total_bytes),
                                     ),
                                 );
-                                let _ = ui_tx
-                                    .send(UiEvent::RestoreStatus("Restore complete.".to_string()));
+                                let _ = ui_tx.send(UiEvent::RestoreFinished {
+                                    success: true,
+                                    message: format!(
+                                        "files={}, dirs={}, symlinks={}, bytes={}",
+                                        stats.files,
+                                        stats.dirs,
+                                        stats.symlinks,
+                                        format_bytes(stats.total_bytes),
+                                    ),
+                                });
                             }
                             Err(e) => {
                                 send_log(&ui_tx, format!("Restore failed: {e}"));
-                                let _ = ui_tx
-                                    .send(UiEvent::RestoreStatus("Restore failed.".to_string()));
+                                let _ = ui_tx.send(UiEvent::RestoreFinished {
+                                    success: false,
+                                    message: format!("{e}"),
+                                });
                             }
                         }
                     }
                     Err(e) => {
                         send_log(&ui_tx, format!("Failed to resolve snapshot: {e}"));
-                        let _ = ui_tx.send(UiEvent::RestoreStatus("Restore failed.".to_string()));
+                        let _ = ui_tx.send(UiEvent::RestoreFinished {
+                            success: false,
+                            message: format!("{e}"),
+                        });
                     }
                 }
 
@@ -2578,7 +2602,7 @@ fn run_worker(
                 }
 
                 cancel_requested.store(false, Ordering::SeqCst);
-                let _ = ui_tx.send(UiEvent::OperationStarted);
+                let _ = ui_tx.send(UiEvent::OperationStarted { cancellable: false });
                 let _ = ui_tx.send(UiEvent::Status("Deleting snapshot...".to_string()));
 
                 let repo = match config::select_repo(&runtime.repos, &repo_name) {
@@ -2633,7 +2657,7 @@ fn run_worker(
                 name_pattern,
             } => {
                 cancel_requested.store(false, Ordering::SeqCst);
-                let _ = ui_tx.send(UiEvent::OperationStarted);
+                let _ = ui_tx.send(UiEvent::OperationStarted { cancellable: false });
                 let _ = ui_tx.send(UiEvent::Status("Searching files...".to_string()));
 
                 let repo = match config::select_repo(&runtime.repos, &repo_name) {
@@ -3231,9 +3255,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             });
                         }
                     }
-                    UiEvent::RestoreStatus(status) => {
+                    UiEvent::RestoreFinished { success, message } => {
                         if let Some(rw) = restore_weak.upgrade() {
-                            rw.set_status_text(status.into());
+                            rw.set_busy(false);
+                            if success {
+                                let _ = rw.hide();
+                                tinyfiledialogs::message_box_ok(
+                                    "Restore",
+                                    &format!("Restore complete.\n\n{message}"),
+                                    tinyfiledialogs::MessageBoxIcon::Info,
+                                );
+                            } else {
+                                rw.set_status_text("Ready".into());
+                                tinyfiledialogs::message_box_ok(
+                                    "Restore",
+                                    "Restore failed. The destination folder must be empty.",
+                                    tinyfiledialogs::MessageBoxIcon::Error,
+                                );
+                            }
                         }
                     }
                     UiEvent::FindResultsData { rows } => {
@@ -3256,8 +3295,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     UiEvent::ConfigSaveError(message) => {
                         ui.set_editor_status(message.into());
                     }
-                    UiEvent::OperationStarted => {
+                    UiEvent::OperationStarted { cancellable } => {
                         ui.set_operation_busy(true);
+                        ui.set_operation_cancellable(cancellable);
                     }
                     UiEvent::OperationFinished => {
                         ui.set_operation_busy(false);
@@ -3650,6 +3690,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return;
             };
 
+            rw.set_busy(true);
             rw.set_status_text("Restoring...".into());
             let _ = tx.send(AppCommand::RestoreSelected {
                 repo_name: rw.get_repo_name().to_string(),
