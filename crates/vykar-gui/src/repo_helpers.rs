@@ -1,12 +1,11 @@
 use std::collections::HashMap;
 
-use chrono::Local;
 use crossbeam_channel::Sender;
 use vykar_core::app::{operations, passphrase};
 use vykar_core::config::{self, ResolvedRepo};
 use vykar_types::error::VykarError;
 
-use crate::messages::UiEvent;
+use crate::messages::{log_entry_now, UiEvent};
 use crate::progress::format_bytes;
 use crate::APP_TITLE;
 
@@ -98,11 +97,7 @@ pub(crate) fn find_repo_for_snapshot<'a>(
 }
 
 pub(crate) fn send_log(ui_tx: &Sender<UiEvent>, message: impl Into<String>) {
-    let timestamp = Local::now().format("%H:%M:%S").to_string();
-    let _ = ui_tx.send(UiEvent::LogEntry {
-        timestamp,
-        message: message.into(),
-    });
+    let _ = ui_tx.send(log_entry_now(message));
 }
 
 pub(crate) fn log_backup_report(

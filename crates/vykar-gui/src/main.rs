@@ -8,7 +8,6 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use chrono::Local;
 use slint::ComponentHandle;
 use tray_icon::menu::{MenuEvent, MenuId, MenuItem};
 
@@ -24,7 +23,7 @@ mod state;
 mod tray;
 mod view_models;
 mod worker;
-use messages::{AppCommand, SnapshotRowData, UiEvent};
+use messages::{log_entry_now, AppCommand, SnapshotRowData, UiEvent};
 use repo_helpers::send_log;
 
 const APP_TITLE: &str = "Vykar Backup";
@@ -66,10 +65,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _scheduler_lock = scheduler_lock;
 
     if !scheduler_lock_held {
-        let _ = ui_tx.send(UiEvent::LogEntry {
-            timestamp: Local::now().format("%H:%M:%S").to_string(),
-            message: "Scheduler disabled \u{2014} another vykar scheduler is already running (daemon or GUI).".to_string(),
-        });
+        let _ = ui_tx.send(log_entry_now(
+            "Scheduler disabled \u{2014} another vykar scheduler is already running (daemon or GUI).",
+        ));
     }
 
     scheduler::spawn_scheduler(

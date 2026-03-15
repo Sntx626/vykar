@@ -1,4 +1,15 @@
+use chrono::Local;
 use vykar_core::snapshot::item::Item;
+
+/// Build a `UiEvent::LogEntry` capturing the current local time for both date and timestamp.
+pub(crate) fn log_entry_now(message: impl Into<String>) -> UiEvent {
+    let now = Local::now();
+    UiEvent::LogEntry {
+        date: now.format("%b %d").to_string(),
+        timestamp: now.format("%H:%M:%S").to_string(),
+        message: message.into(),
+    }
+}
 
 // ── Commands (UI → worker) ──
 
@@ -101,6 +112,7 @@ pub(crate) struct FindResultRow {
 pub(crate) enum UiEvent {
     Status(String),
     LogEntry {
+        date: String,
         timestamp: String,
         message: String,
     },

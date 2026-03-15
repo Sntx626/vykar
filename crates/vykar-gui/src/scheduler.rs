@@ -3,11 +3,10 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use chrono::Local;
 use crossbeam_channel::Sender;
 use vykar_core::config::ScheduleConfig;
 
-use crate::messages::{AppCommand, UiEvent};
+use crate::messages::{log_entry_now, AppCommand, UiEvent};
 
 #[derive(Debug)]
 pub(crate) struct SchedulerState {
@@ -71,12 +70,9 @@ pub(crate) fn spawn_scheduler(
                     Err(e) => {
                         state.paused = true;
                         state.next_run = None;
-                        let _ = ui_tx.send(UiEvent::LogEntry {
-                            timestamp: Local::now().format("%H:%M:%S").to_string(),
-                            message: format!(
-                                "Scheduler error: {e}. Scheduling paused — reload config to resume."
-                            ),
-                        });
+                        let _ = ui_tx.send(log_entry_now(format!(
+                            "Scheduler error: {e}. Scheduling paused — reload config to resume."
+                        )));
                         continue;
                     }
                 }
@@ -90,12 +86,9 @@ pub(crate) fn spawn_scheduler(
                         Err(e) => {
                             state.paused = true;
                             state.next_run = None;
-                            let _ = ui_tx.send(UiEvent::LogEntry {
-                                timestamp: Local::now().format("%H:%M:%S").to_string(),
-                                message: format!(
-                                    "Scheduler error: {e}. Scheduling paused — reload config to resume."
-                                ),
-                            });
+                            let _ = ui_tx.send(log_entry_now(format!(
+                                "Scheduler error: {e}. Scheduling paused — reload config to resume."
+                            )));
                         }
                     }
                 }

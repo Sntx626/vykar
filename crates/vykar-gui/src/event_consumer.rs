@@ -27,27 +27,35 @@ fn ensure_log_model(ui: &MainWindow) -> Rc<VecModel<ModelRc<StandardListViewItem
     })
 }
 
-const MAX_LOG_ROWS: usize = 10_000;
-const TRIM_TARGET: usize = 9_000;
+pub(crate) const MAX_LOG_ROWS: usize = 10_000;
+pub(crate) const TRIM_TARGET: usize = 9_000;
 
-pub(crate) fn append_log_row(ui: &MainWindow, timestamp: &str, message: &str) {
-    let model = ensure_log_model(ui);
+/// Insert a 3-column log row (Date, Time, Event) at position 0 (newest first).
+/// Trims the model to `TRIM_TARGET` rows when it exceeds `MAX_LOG_ROWS`.
+pub(crate) fn prepend_log_entry(
+    model: &Rc<VecModel<ModelRc<StandardListViewItem>>>,
+    date: &str,
+    timestamp: &str,
+    message: &str,
+) {
     let row: Vec<StandardListViewItem> = vec![
+        StandardListViewItem::from(SharedString::from(date)),
         StandardListViewItem::from(SharedString::from(timestamp)),
         StandardListViewItem::from(SharedString::from(message)),
     ];
-    model.push(ModelRc::new(VecModel::from(row)));
+    model.insert(0, ModelRc::new(VecModel::from(row)));
     if model.row_count() > MAX_LOG_ROWS {
-        // Rebuild from the newest TRIM_TARGET rows in one shot to avoid
-        // O(n)-per-row front-removal and repeated model-change notifications.
-        let start = model.row_count() - TRIM_TARGET;
-        let keep: Vec<_> = (start..model.row_count())
+        // Keep the first TRIM_TARGET rows (newest) and drop the rest.
+        let keep: Vec<_> = (0..TRIM_TARGET)
             .map(|i| model.row_data(i).unwrap())
             .collect();
-        let fresh = Rc::new(VecModel::from(keep));
-        ui.set_log_rows(ModelRc::from(fresh.clone()));
-        LOG_MODEL.with(|cell| *cell.borrow_mut() = Some(fresh));
+        model.set_vec(keep);
     }
+}
+
+fn append_log_row(ui: &MainWindow, date: &str, timestamp: &str, message: &str) {
+    let model = ensure_log_model(ui);
+    prepend_log_entry(&model, date, timestamp, message);
 }
 
 pub(crate) fn capture_gui_state(ui: &MainWindow) -> Option<state::GuiState> {
@@ -105,8 +113,12 @@ pub(crate) fn spawn(
 
                 match event {
                     UiEvent::Status(status) => ui.set_status_text(status.into()),
-                    UiEvent::LogEntry { timestamp, message } => {
-                        append_log_row(&ui, &timestamp, &message);
+                    UiEvent::LogEntry {
+                        date,
+                        timestamp,
+                        message,
+                    } => {
+                        append_log_row(&ui, &date, &timestamp, &message);
                     }
                     UiEvent::ConfigInfo { path, schedule } => {
                         ui.global::<AppData>()
@@ -258,4 +270,57 @@ pub(crate) fn spawn(
             });
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn col_text(
+        model: &Rc<VecModel<ModelRc<StandardListViewItem>>>,
+        row: usize,
+        col: usize,
+    ) -> String {
+        let row_model = model.row_data(row).unwrap();
+        row_model.row_data(col).unwrap().text.to_string()
+    }
+
+    #[test]
+    fn row_has_three_columns() {
+        let model = Rc::new(VecModel::<ModelRc<StandardListViewItem>>::default());
+        prepend_log_entry(&model, "Mar 15", "10:30:00", "test event");
+
+        assert_eq!(model.row_count(), 1);
+        assert_eq!(col_text(&model, 0, 0), "Mar 15");
+        assert_eq!(col_text(&model, 0, 1), "10:30:00");
+        assert_eq!(col_text(&model, 0, 2), "test event");
+    }
+
+    #[test]
+    fn newest_entry_is_at_top() {
+        let model = Rc::new(VecModel::<ModelRc<StandardListViewItem>>::default());
+        prepend_log_entry(&model, "Mar 14", "09:00:00", "older");
+        prepend_log_entry(&model, "Mar 15", "10:00:00", "newer");
+
+        assert_eq!(model.row_count(), 2);
+        assert_eq!(col_text(&model, 0, 2), "newer");
+        assert_eq!(col_text(&model, 1, 2), "older");
+    }
+
+    #[test]
+    fn trim_keeps_newest_rows() {
+        let model = Rc::new(VecModel::<ModelRc<StandardListViewItem>>::default());
+        for i in 0..=MAX_LOG_ROWS {
+            prepend_log_entry(&model, "D", "T", &format!("msg-{i}"));
+        }
+
+        assert_eq!(model.row_count(), TRIM_TARGET);
+        // Row 0 should be the most recently inserted entry.
+        assert_eq!(col_text(&model, 0, 2), format!("msg-{MAX_LOG_ROWS}"));
+        // Last kept row is the (MAX_LOG_ROWS+1 - TRIM_TARGET)'th newest.
+        assert_eq!(
+            col_text(&model, TRIM_TARGET - 1, 2),
+            format!("msg-{}", MAX_LOG_ROWS + 1 - TRIM_TARGET)
+        );
+    }
 }
