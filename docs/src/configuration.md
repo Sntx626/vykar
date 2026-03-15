@@ -245,9 +245,17 @@ For `vykar daemon`, encrypted repositories must have a non-interactive passphras
 ## Compression
 
 ```yaml
-compression:
-  algorithm: "lz4"                   # "lz4", "zstd", or "none"
-  zstd_level: 3                      # Only used with zstd
+compression:                           # Optional, defaults shown
+  algorithm: "lz4"                     # "lz4", "zstd", or "none"
+  zstd_level: 3                        # 1-22, only used with zstd
+```
+
+LZ4 (default) is optimised for speed — even on incompressible data the overhead is negligible, and reduced I/O usually more than compensates. ZSTD gives better compression ratios at the cost of more CPU; level 3 is a good starting point. `none` disables compression entirely.
+
+Use `--compression` on the CLI to override the configured algorithm for a single backup run:
+
+```bash
+vykar backup --compression zstd
 ```
 
 ## Chunker
