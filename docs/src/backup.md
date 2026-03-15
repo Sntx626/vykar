@@ -28,12 +28,12 @@ For more complex situations you can add overrides to source groups. Each "rich" 
 
 ```yaml
 sources:
-  - path: "/home/user/photos"
-    label: "photos"
-  - paths:
+  - label: "photos"
+    path: "/home/user/photos"
+  - label: "docs"
+    paths:
       - "/home/user/documents"
       - "/home/user/notes"
-    label: "docs"
     exclude: ["*.tmp"]
     hooks:
       before: "echo starting docs backup"
@@ -95,14 +95,15 @@ You can capture the stdout of shell commands directly into your backup using `co
 
 ```yaml
 sources:
-  - path: /var/www/myapp
-    label: myapp
+  - label: databases
     command_dumps:
       - name: postgres.sql
         command: pg_dump -U myuser mydb
       - name: redis.rdb
         command: redis-cli --rdb -
 ```
+
+Each source with `command_dumps` produces its own snapshot. An explicit `label` is required.
 
 Each command runs via `sh -c` and the captured output is stored as a virtual file under `.vykar-dumps/` in the snapshot. On restore, these appear as regular files:
 
@@ -111,17 +112,7 @@ Each command runs via `sh -c` and the captured output is stored as a virtual fil
 .vykar-dumps/redis.rdb
 ```
 
-You can also create dump-only sources with no filesystem paths:
-
-```yaml
-sources:
-  - label: databases
-    command_dumps:
-      - name: all-databases.sql
-        command: pg_dumpall -U postgres
-```
-
-Dump-only sources require an explicit `label`. If any command exits with a non-zero status, the backup is aborted.
+If any command exits with a non-zero status, the backup is aborted.
 
 ## Related pages
 

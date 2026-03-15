@@ -107,7 +107,7 @@ vykar list -R /backups/local
 
 ## Sources
 
-Sources can be a simple list of paths or rich entries with per-source options. Each source entry produces one snapshot per backup run.
+Sources define what to back up — filesystem paths, command output, or both. Each source entry produces one snapshot per backup run.
 
 **Simple form:**
 
@@ -123,8 +123,8 @@ Simple entries are grouped into one source. With one simple path, the source lab
 
 ```yaml
 sources:
-  - path: "/home/user/documents"
-    label: "docs"
+  - label: "docs"
+    path: "/home/user/documents"
     exclude: ["*.tmp", ".cache/**"]
     # exclude_if_present: [".nobackup", "CACHEDIR.TAG"]
     # one_file_system: true
@@ -144,10 +144,10 @@ Use `paths` (plural) to group several directories into a single source. An expli
 
 ```yaml
 sources:
-  - paths:
+  - label: "writing"
+    paths:
       - "/home/user/documents"
       - "/home/user/notes"
-    label: "writing"
     exclude: ["*.tmp"]
 ```
 
@@ -159,8 +159,8 @@ Each source entry in rich form can override global settings. This lets you tailo
 
 ```yaml
 sources:
-  - path: "/home/user/documents"
-    label: "docs"
+  - label: "docs"
+    path: "/home/user/documents"
     exclude: ["*.tmp"]
     xattrs:
       enabled: false                 # Override top-level xattrs setting for this source
@@ -169,8 +169,8 @@ sources:
       keep_daily: 7
       keep_weekly: 4
 
-  - path: "/home/user/photos"
-    label: "photos"
+  - label: "photos"
+    path: "/home/user/photos"
     repos: ["local", "remote"]       # Back up to both repos
     retention:
       keep_daily: 30
@@ -181,20 +181,21 @@ sources:
 
 Per-source fields that override globals: `exclude`, `exclude_if_present`, `one_file_system`, `git_ignore`, `repos`, `retention`, `hooks`, `command_dumps`.
 
-## Command Dumps
+### Command Dumps
 
 Capture the stdout of shell commands directly into your backup. Useful for database dumps, API exports, or any generated data that doesn't live as a regular file on disk.
 
 ```yaml
 sources:
-  - path: /var/www/myapp
-    label: myapp
+  - label: databases
     command_dumps:
       - name: postgres.sql
         command: pg_dump -U myuser mydb
       - name: redis.rdb
         command: redis-cli --rdb -
 ```
+
+Each source with `command_dumps` produces its own snapshot. An explicit `label` is required.
 
 Each entry has two required fields:
 
@@ -205,14 +206,17 @@ Each entry has two required fields:
 
 Output is stored as virtual files under `.vykar-dumps/` in the snapshot. On restore they appear as regular files (e.g. `.vykar-dumps/postgres.sql`).
 
-You can also create **dump-only sources** with no filesystem paths — an explicit `label` is required:
+To include command dumps in the same snapshot as filesystem paths, add both to one source entry:
 
 ```yaml
 sources:
-  - label: databases
+  - label: server
+    paths:
+      - /etc
+      - /var/www
     command_dumps:
-      - name: all-databases.sql
-        command: pg_dumpall -U postgres
+      - name: postgres.sql
+        command: pg_dump -U myuser mydb
 ```
 
 If a dump command exits with non-zero status, the backup is aborted. Any chunks already uploaded to packs remain on disk but are not added to the index; they are reclaimed on the next `vykar compact` run.
@@ -418,8 +422,8 @@ hooks:                               # Global hooks: run for backup/prune/check/
 
 ```yaml
 sources:
-  - path: /raid1/immich/db-backups
-    label: immich
+  - label: immich
+    path: /raid1/immich/db-backups
     hooks:
       before: '/raid1/immich/backup_db.sh'  # Correct
       # before_backup: '...'               # NOT valid here — use 'before' instead

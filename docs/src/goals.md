@@ -27,8 +27,8 @@ Vykar doesn't have dedicated flags for specific databases or services. Instead, 
 
 ```yaml
 sources:
-  - path: /var/backups/db
-    label: databases
+  - label: databases
+    path: /var/backups/db
     hooks:
       before: "pg_dump -Fc mydb > /var/backups/db/mydb.dump"
       after:  "rm -f /var/backups/db/mydb.dump"

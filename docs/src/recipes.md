@@ -36,8 +36,8 @@ If you need to run additional steps around the dump (e.g. custom authentication,
 
 ```yaml
 sources:
-  - path: /var/backups/postgres
-    label: postgres
+  - label: postgres
+    path: /var/backups/postgres
     hooks:
       before: >
         mkdir -p /var/backups/postgres &&
@@ -60,8 +60,8 @@ With hooks:
 
 ```yaml
 sources:
-  - path: /var/backups/mysql
-    label: mysql
+  - label: mysql
+    path: /var/backups/mysql
     hooks:
       before: >
         mkdir -p /var/backups/mysql &&
@@ -98,8 +98,8 @@ SQLite can't stream to stdout, so use a hook. Copying the database file directly
 
 ```yaml
 sources:
-  - path: /var/backups/sqlite
-    label: app-database
+  - label: app-database
+    path: /var/backups/sqlite
     hooks:
       before: >
         mkdir -p /var/backups/sqlite &&
@@ -112,8 +112,8 @@ sources:
 
 ```yaml
 sources:
-  - path: /var/backups/redis
-    label: redis
+  - label: redis
+    path: /var/backups/redis
     hooks:
       before: >
         mkdir -p /var/backups/redis &&
@@ -139,8 +139,8 @@ For volumes that hold files not actively written to by a running process — con
 
 ```yaml
 sources:
-  - path: /var/lib/docker/volumes/myapp_data/_data
-    label: myapp
+  - label: myapp
+    path: /var/lib/docker/volumes/myapp_data/_data
 ```
 
 > **Note:** The default volume path `/var/lib/docker/volumes/` applies to standard Docker installs on Linux. It differs for Docker Desktop on macOS/Windows, rootless Docker, Podman (`/var/lib/containers/storage/volumes/` for root, `~/.local/share/containers/storage/volumes/` for rootless), and custom `data-root` configurations. Run `docker volume inspect <n>` or `podman volume inspect <n>` to find the actual path.
@@ -152,8 +152,8 @@ For applications that write to the volume but can tolerate a short stop, stop th
 
 ```yaml
 sources:
-  - path: /var/lib/docker/volumes/wiki_data/_data
-    label: wiki
+  - label: wiki
+    path: /var/lib/docker/volumes/wiki_data/_data
     hooks:
       before: "docker stop wiki"
       finally: "docker start wiki"
@@ -201,8 +201,8 @@ Use separate source entries so each service gets its own label, retention policy
 
 ```yaml
 sources:
-  - path: /var/lib/docker/volumes/nginx_config/_data
-    label: nginx
+  - label: nginx
+    path: /var/lib/docker/volumes/nginx_config/_data
     retention:
       keep_daily: 7
 
@@ -213,8 +213,8 @@ sources:
     retention:
       keep_daily: 30
 
-  - path: /var/lib/docker/volumes/uploads/_data
-    label: uploads
+  - label: uploads
+    path: /var/lib/docker/volumes/uploads/_data
 ```
 
 
@@ -233,8 +233,8 @@ Use hooks to freeze the guest filesystem before backing up the disk image, then 
 
 ```yaml
 sources:
-  - path: /var/lib/libvirt/images
-    label: vm-images
+  - label: vm-images
+    path: /var/lib/libvirt/images
     hooks:
       before: >
         echo '{"execute":"guest-fsfreeze-freeze"}' |
@@ -262,8 +262,8 @@ For filesystems that support snapshots, the safest approach is to snapshot first
 
 ```yaml
 sources:
-  - path: /mnt/.snapshots/data-backup
-    label: data
+  - label: data
+    path: /mnt/.snapshots/data-backup
     hooks:
       before: "btrfs subvolume snapshot -r /mnt/data /mnt/.snapshots/data-backup"
       after:  "btrfs subvolume delete /mnt/.snapshots/data-backup"
@@ -280,8 +280,8 @@ mkdir -p /mnt/.snapshots
 
 ```yaml
 sources:
-  - path: /tank/data/.zfs/snapshot/vykar-tmp
-    label: data
+  - label: data
+    path: /tank/data/.zfs/snapshot/vykar-tmp
     hooks:
       before: "zfs snapshot tank/data@vykar-tmp"
       after:  "zfs destroy tank/data@vykar-tmp"
@@ -298,8 +298,8 @@ sources:
 
 ```yaml
 sources:
-  - path: /mnt/lvm-snapshot
-    label: data
+  - label: data
+    path: /mnt/lvm-snapshot
     hooks:
       before: >
         lvcreate -s -n vykar-snap -L 5G /dev/vg0/data &&
