@@ -1,0 +1,54 @@
+default_install_hook_types = ["pre-commit", "pre-push"]
+
+# Exclude vendored, generated, and binary corpus files
+exclude = '(^docs/mermaid\.min\.js$|^docs/src/images/|^fuzz/corpus/)'
+
+# --- File hygiene (built-in, fast) ---
+[[repos]]
+repo = "builtin"
+hooks = [
+    { id = "trailing-whitespace" },
+    { id = "end-of-file-fixer" },
+    { id = "check-yaml" },
+    { id = "check-toml" },
+    { id = "check-merge-conflict" },
+    { id = "check-added-large-files", args = ["--maxkb=1024"] },
+]
+
+# --- Rust toolchain checks ---
+[[repos]]
+repo = "local"
+
+[[repos.hooks]]
+id = "cargo-fmt"
+name = "cargo fmt --check"
+language = "system"
+entry = "cargo fmt --all -- --check"
+pass_filenames = false
+files = '\.(rs|toml)$'
+
+[[repos.hooks]]
+id = "cargo-clippy"
+name = "cargo clippy"
+language = "system"
+entry = "cargo clippy --workspace --all-targets --all-features -- -D warnings"
+pass_filenames = false
+files = '\.(rs|toml)$'
+
+[[repos.hooks]]
+id = "cargo-doc"
+name = "cargo doc warnings"
+language = "system"
+entry = "cargo doc --workspace --no-deps --all-features"
+env = { RUSTDOCFLAGS = "-Dwarnings" }
+pass_filenames = false
+files = '\.(rs|toml)$'
+
+[[repos.hooks]]
+id = "cargo-test"
+name = "cargo test"
+language = "system"
+entry = "cargo test --workspace"
+pass_filenames = false
+stages = ["pre-push"]
+files = '\.(rs|toml)$'

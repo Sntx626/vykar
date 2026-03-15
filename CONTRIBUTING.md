@@ -19,7 +19,16 @@ AI-assisted contributions are welcome, but they must meet the same quality bar a
 ```bash
 cargo build --release
 cargo test
-make pre-commit          # fmt-check + clippy -D warnings + tests
+make pre-commit          # fmt-check + clippy + doc-check + tests
 ```
+
+### Git hooks
+
+This project uses [prek](https://prek.j178.dev/) for git hooks. Run `prek install` once after cloning to install them.
+
+- **pre-commit**: formatting, clippy, doc warnings, and file hygiene checks
+- **pre-push**: full test suite
+
+Individual targets (`fmt-check`, `lint`, `doc-check`, `test`) remain available for ad-hoc use.
 
 See [CLAUDE.md](CLAUDE.md) for the full project structure and architecture overview.

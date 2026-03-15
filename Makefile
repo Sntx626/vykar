@@ -1,5 +1,6 @@
 .PHONY: \
 	app \
+	doc-check \
 	docs-build \
 	docs-serve \
 	docs-test \
@@ -30,7 +31,10 @@ test:
 test-all:
 	cargo test --workspace -- --include-ignored
 
-pre-commit: fmt-check lint test
+doc-check:
+	RUSTDOCFLAGS="-Dwarnings" cargo doc --workspace --no-deps --all-features
+
+pre-commit: fmt-check lint doc-check test
 
 APP_BUNDLE = target/release/Vykar Backup.app
 

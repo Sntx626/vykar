@@ -45,6 +45,11 @@ jobs:
       - name: Lint (clippy)
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
+      - name: Check docs
+        run: cargo doc --workspace --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: -Dwarnings
+
       - name: Run tests
         run: make test-all
 

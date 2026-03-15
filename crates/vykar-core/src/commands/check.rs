@@ -63,7 +63,7 @@ pub enum IntegrityIssue {
         snapshot_id: SnapshotId,
         snapshot_name: Option<String>,
     },
-    /// Raw snapshots/<id> with unparseable ID (never enters manifest).
+    /// Raw `snapshots/<id>` with unparseable ID (never enters manifest).
     InvalidSnapshotKey { storage_key: String },
     /// Snapshot item_ptrs reference chunk not in index.
     DanglingItemPtr {

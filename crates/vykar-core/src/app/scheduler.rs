@@ -23,7 +23,7 @@ impl SchedulerLock {
         Self::try_acquire_at(None)
     }
 
-    /// Like [`try_acquire`] but allows overriding the lock file path (for tests).
+    /// Like [`SchedulerLock::try_acquire`] but allows overriding the lock file path (for tests).
     pub fn try_acquire_at(path_override: Option<&std::path::Path>) -> Option<Self> {
         let path = match path_override {
             Some(p) => p.to_path_buf(),

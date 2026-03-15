@@ -160,7 +160,7 @@ Vec's growth strategy (0→4→8→16→32→64...) means pushing 1000 items one
 Cloning heap-allocated data (Vec, String, HashMap) copies all data. The Rust Design Patterns book explicitly identifies "clone to satisfy the borrow checker" as an anti-pattern. Key alternatives:
 
 - **`Cow<'a, str>`** for conditional ownership — avoids allocation when no modification is needed
-- **`Arc<T>`** for shared ownership — clone only increments a reference count  
+- **`Arc<T>`** for shared ownership — clone only increments a reference count
 - **`clone_from(&b)`** instead of `a = b.clone()` — reuses `a`'s existing heap allocation
 - **`as_deref()`** for `Option<String>` → `Option<&str>` conversion
 

@@ -14,7 +14,7 @@ use crate::{
 
 /// HTTP REST backend for remote repository access via vykar-server.
 pub struct RestBackend {
-    /// Base URL, e.g. "https://backup.example.com"
+    /// Base URL, e.g. `https://backup.example.com`
     base_url: String,
     agent: ureq::Agent,
     token: Option<String>,
