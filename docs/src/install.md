@@ -11,7 +11,7 @@ Or download the latest release for your platform from the [releases page](https:
 
 ## Docker
 
-Available as `ghcr.io/borgbase/vykar` on GitHub Container Registry.
+Available as `ghcr.io/borgbase/vykar` on GitHub Container Registry. An `apprise` variant (`ghcr.io/borgbase/vykar:latest-apprise`) is also available with the [Apprise](https://github.com/caronc/apprise) CLI pre-installed for [hook notifications](configuration.md#notifications-with-apprise).
 
 ### Config file
 
@@ -99,6 +99,7 @@ The daemon logs whether the reload succeeded or was rejected (invalid config).
 - Mount source directories under `/data/` and reference them as `/data/...` in the config
 - For encryption, use `VYKAR_PASSPHRASE` env var or Docker secrets via `passcommand: "cat /run/secrets/vykar_passphrase"`
 - Use a named volume for `/cache` to persist the snapshot cache across restarts
+- The `apprise` variant (`ghcr.io/borgbase/vykar:latest-apprise`) includes the Apprise CLI for sending notifications to 100+ services from hooks. See [Notifications with Apprise](configuration.md#notifications-with-apprise).
 - The image includes `curl`, `jq`, and `bash` for use in [hooks](configuration.md#hooks) (e.g. monitoring webhooks, JSON payloads). For additional tools, extend the image:
       ```dockerfile
       FROM ghcr.io/borgbase/vykar

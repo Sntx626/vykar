@@ -469,6 +469,8 @@ Install it with:
 pip install apprise
 ```
 
+If you use the Docker image, the `apprise` variant has it pre-installed — use the `latest-apprise` tag (or e.g. `0.12.6-apprise`). See [Docker installation](install.md#docker).
+
 Then add hooks that call `apprise` with the service URLs you want:
 
 ```yaml
