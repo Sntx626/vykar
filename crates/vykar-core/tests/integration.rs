@@ -84,6 +84,7 @@ fn make_test_config(repo_dir: &std::path::Path) -> VykarConfig {
         compact: CompactConfig::default(),
         cache_dir: None,
         trust_repo: false,
+        hostname_override: None,
     }
 }
 

@@ -41,6 +41,9 @@ pub struct VykarConfig {
     /// Runtime-only: accept a changed repository identity and re-pin.
     #[serde(skip)]
     pub trust_repo: bool,
+    /// Override hostname in snapshot metadata. Runtime-only.
+    #[serde(skip)]
+    pub hostname_override: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

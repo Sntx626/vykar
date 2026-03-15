@@ -145,6 +145,10 @@ compression:
 #       finally:
 #         - "echo finished offsite backup"
 
+# Override hostname recorded in snapshots (default: short system hostname).
+# Useful when gethostname() returns a network-dependent FQDN (macOS).
+# hostname: MyMachine
+
 # --- Global defaults and advanced options -----------------------------------
 
 # Encryption defaults to mode: auto.

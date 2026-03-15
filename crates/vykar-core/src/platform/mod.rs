@@ -2,6 +2,22 @@ pub mod fs;
 pub mod paths;
 pub mod shell;
 
+/// Strip the domain suffix from a hostname (everything after the first `.`).
+pub fn strip_hostname_domain(hostname: &str) -> String {
+    match hostname.find('.') {
+        Some(pos) => hostname[..pos].to_string(),
+        None => hostname.to_string(),
+    }
+}
+
+/// Return the short hostname (domain stripped).
+/// On macOS, gethostname() returns a network-dependent FQDN; truncating
+/// at the first dot yields the stable local hostname. On Linux/Windows
+/// this is typically a no-op.
+pub fn short_hostname() -> String {
+    strip_hostname_domain(&hostname())
+}
+
 /// Return the system hostname, or `"unknown"` if it cannot be determined.
 pub fn hostname() -> String {
     #[cfg(unix)]
@@ -42,5 +58,28 @@ pub fn is_pid_alive(pid: u32) -> bool {
     {
         let _ = pid;
         true // conservative: assume alive
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strip_hostname_domain_removes_suffix() {
+        assert_eq!(strip_hostname_domain("MiniBeard.local"), "MiniBeard");
+        assert_eq!(strip_hostname_domain("MiniBeard.fritz.box"), "MiniBeard");
+    }
+
+    #[test]
+    fn strip_hostname_domain_noop_without_dot() {
+        assert_eq!(strip_hostname_domain("myhost"), "myhost");
+        assert_eq!(strip_hostname_domain(""), "");
+    }
+
+    #[test]
+    fn short_hostname_returns_nonempty() {
+        let h = short_hostname();
+        assert!(!h.is_empty() || hostname() == "unknown");
     }
 }

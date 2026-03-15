@@ -412,7 +412,13 @@ pub fn run_with_progress(
         let time_end = Utc::now();
 
         // Build snapshot metadata.
-        let hostname = crate::platform::hostname();
+        let hostname = config
+            .hostname_override
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .unwrap_or_else(crate::platform::short_hostname);
         let username = std::env::var("USER").unwrap_or_else(|_| "unknown".into());
 
         let snapshot_meta = SnapshotMeta {

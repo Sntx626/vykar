@@ -156,6 +156,9 @@ struct ConfigDocument {
     /// Root directory for all local caches and pack temp files.
     #[serde(default)]
     cache_dir: Option<String>,
+    /// Override hostname recorded in snapshot metadata.
+    #[serde(default)]
+    hostname: Option<String>,
 }
 
 // Backward-compatible alias used by internal tests.
@@ -447,6 +450,12 @@ fn resolve_document(mut raw: ConfigDocument) -> vykar_types::error::Result<Vec<R
                         .filter(|s| !s.is_empty())
                         .map(expand_tilde),
                     trust_repo: false,
+                    hostname_override: raw
+                        .hostname
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(String::from),
                 },
                 global_hooks: raw.hooks.clone(),
                 repo_hooks,
@@ -1243,6 +1252,7 @@ repositories:
                 compact: CompactConfig::default(),
                 cache_dir: None,
                 trust_repo: false,
+                hostname_override: None,
             },
             global_hooks: HooksConfig::default(),
             repo_hooks: HooksConfig::default(),
@@ -2513,5 +2523,29 @@ sources:
                 .contains("dump-only source entries require an explicit 'label'"),
             "unexpected: {err}"
         );
+    }
+
+    #[test]
+    fn hostname_override_parsed_from_yaml() {
+        let yaml =
+            "repositories:\n  - url: /tmp/repo\nsources:\n  - /tmp/src\nhostname: MyOverride\n";
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, yaml).unwrap();
+        let repos = load_and_resolve(&path).unwrap();
+        assert_eq!(
+            repos[0].config.hostname_override.as_deref(),
+            Some("MyOverride")
+        );
+    }
+
+    #[test]
+    fn hostname_override_trims_whitespace() {
+        let yaml = "repositories:\n  - url: /tmp/repo\nsources:\n  - /tmp/src\nhostname: \"  \"\n";
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, yaml).unwrap();
+        let repos = load_and_resolve(&path).unwrap();
+        assert!(repos[0].config.hostname_override.is_none());
     }
 }

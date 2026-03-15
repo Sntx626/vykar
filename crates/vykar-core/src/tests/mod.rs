@@ -9,6 +9,7 @@ mod delete_repo;
 mod error_messages;
 mod format;
 mod helpers;
+mod hostname;
 mod index;
 mod info;
 mod item;

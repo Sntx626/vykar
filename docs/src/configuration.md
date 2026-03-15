@@ -355,6 +355,18 @@ xattrs:                              # Extended attribute handling
   enabled: true                      # Preserve xattrs on backup/restore (default true, Unix-only)
 ```
 
+## Hostname
+
+By default, vykar records the short system hostname (everything before the first `.`) in each snapshot. On macOS, `gethostname()` returns a network-dependent FQDN (e.g. `MyMac.local` vs `MyMac.fritz.box` depending on VPN); truncating at the first dot keeps the hostname stable across network changes. On Linux and Windows, hostnames typically have no dots, so this is a no-op.
+
+To override the hostname recorded in snapshots:
+
+```yaml
+hostname: MyMachine
+```
+
+This only affects snapshot metadata — lock files and session markers always use the raw system hostname.
+
 ## Retention
 
 ```yaml
