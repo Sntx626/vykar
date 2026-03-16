@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use blake2::digest::{Update, VariableOutput};
 use blake2::Blake2bVar;
 use serde::{Deserialize, Serialize};
-use tracing::debug;
+use tracing::{debug, info, warn};
 
 use crate::platform::paths;
 use crate::snapshot::item::ChunkRef;
@@ -264,6 +264,23 @@ impl FileCache {
         }
     }
 
+    /// Return a human-readable reason why a section is invalid for the given
+    /// label and paths. Returns `None` if the section is valid.
+    pub fn diagnose_section(&self, source_label: &str, source_paths: &[String]) -> Option<String> {
+        match self.sections.get(source_label) {
+            None => Some(format!(
+                "no section for label {:?} (available: {:?})",
+                source_label,
+                self.sections.keys().collect::<Vec<_>>()
+            )),
+            Some(section) if section.source_paths != source_paths => Some(format!(
+                "source paths changed: cached={:?}, current={:?}",
+                section.source_paths, source_paths
+            )),
+            _ => None,
+        }
+    }
+
     /// Total entries across all sections.
     pub fn len(&self) -> usize {
         self.sections.values().map(|s| s.entries.len()).sum()
@@ -335,7 +352,10 @@ impl FileCache {
         let plaintext = {
             let data = match std::fs::read(&path) {
                 Ok(d) => d,
-                Err(_) => return Self::new(),
+                Err(_) => {
+                    debug!(path = %path.display(), "file cache: no cache file on disk, starting fresh");
+                    return Self::new();
+                }
             };
             match unpack_object_expect_with_context(
                 &data,
@@ -344,16 +364,33 @@ impl FileCache {
                 crypto,
             ) {
                 Ok(pt) => pt,
-                Err(_) => {
-                    debug!("file cache: failed to decrypt, starting fresh");
+                Err(e) => {
+                    warn!(path = %path.display(), error = %e, "file cache: failed to decrypt (stale or corrupt cache file?), starting fresh");
                     return Self::new();
                 }
             }
         };
         match Self::decode_from_plaintext(&plaintext) {
-            Ok(cache) => cache,
+            Ok(cache) => {
+                let total_entries: usize = cache.sections.values().map(|s| s.entries.len()).sum();
+                info!(
+                    sections = cache.sections.len(),
+                    entries = total_entries,
+                    "file cache loaded from disk"
+                );
+                for (label, section) in &cache.sections {
+                    info!(
+                        label,
+                        anchor = %hex::encode(&section.anchor_snapshot_id.0[..8]),
+                        entries = section.entries.len(),
+                        paths = ?section.source_paths,
+                        "file cache section"
+                    );
+                }
+                cache
+            }
             Err(e) => {
-                debug!("file cache: failed to deserialize: {e}, starting fresh");
+                warn!(error = %e, "file cache: failed to deserialize, starting fresh");
                 Self::new()
             }
         }

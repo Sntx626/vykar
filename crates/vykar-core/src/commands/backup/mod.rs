@@ -345,6 +345,18 @@ pub fn run_with_progress(
                 .file_cache()
                 .validate_section(source_label, source_paths);
 
+            if section_valid {
+                info!(
+                    source_label,
+                    "file cache: section valid, using cached metadata"
+                );
+            } else if let Some(reason) = repo
+                .file_cache()
+                .diagnose_section(source_label, source_paths)
+            {
+                info!(source_label, reason = %reason, "file cache: section invalid, cold start");
+            }
+
             // Prepare read cache: tell it which section to search during lookup.
             repo.file_cache_mut().set_active_for_lookup(source_label);
 
