@@ -647,8 +647,8 @@ fn file_cache_persists_and_matches_snapshot_items() {
             .collect();
         assert_eq!(files.len(), 2);
 
-        // Set up the active section for lookup.
-        repo.file_cache_mut().set_active_for_lookup("source");
+        // Set up the active section for lookup (keyed by source paths).
+        repo.file_cache_mut().activate_for_paths(&source_paths);
 
         // Cache keys are canonicalized (matches walker behavior).
         let canonical_source = std::fs::canonicalize(&source_dir).unwrap();
@@ -833,7 +833,7 @@ fn file_cache_misses_on_modified_file() {
 
     // The cache should now reflect the new content for modified.bin.
     // Cache keys are canonicalized (matches walker behavior).
-    repo.file_cache_mut().set_active_for_lookup("source");
+    repo.file_cache_mut().activate_for_paths(&source_paths);
     let canonical_source = std::fs::canonicalize(&source_dir).unwrap();
     let abs_modified = canonical_source.join("modified.bin");
     let abs_str = abs_modified.to_str().unwrap();

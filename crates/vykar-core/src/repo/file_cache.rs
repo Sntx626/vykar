@@ -106,26 +106,32 @@ pub struct FileCacheEntry {
     pub chunk_refs: Vec<ChunkRef>,
 }
 
-/// A per-source-label section of the file cache.
+/// A per-source section of the file cache, keyed by source paths.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CacheSection {
     /// The snapshot ID that anchors this section's validity.
     pub anchor_snapshot_id: SnapshotId,
-    /// The source_paths that were active when this section was built.
-    pub source_paths: Vec<String>,
     /// The actual cached entries.
     pub(crate) entries: HashMap<PathHash, FileCacheEntry>,
 }
 
+/// Deterministic section key derived from source paths.
+/// Order-sensitive, matching snapshot metadata comparison semantics.
+fn section_key(source_paths: &[String]) -> String {
+    source_paths.join("\0")
+}
+
 /// Maps path hashes to their cached metadata and chunk references,
-/// scoped by source series (source_label).
+/// scoped by source paths.
 ///
-/// Each source label gets its own `CacheSection` so that dump-only sources
-/// don't overwrite filesystem source caches, and vice versa.
+/// Each unique set of source paths gets its own `CacheSection` so that
+/// dump-only sources don't overwrite filesystem source caches, and vice versa.
+/// The section key is derived from the source paths themselves, so renaming
+/// the user-facing label does not invalidate the cache.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct FileCache {
     sections: BTreeMap<String, CacheSection>,
-    /// Runtime-only: the source_label currently targeted by `insert` (write cache)
+    /// Runtime-only: the section key currently targeted by `insert` (write cache)
     /// or searched by `lookup` (read cache).
     #[serde(skip)]
     active_label: Option<String>,
@@ -139,26 +145,34 @@ impl FileCache {
         }
     }
 
-    /// Start a new section for the given source label on the **write** cache.
+    /// Start a new section for the given source paths on the **write** cache.
     /// Creates an empty section and sets it as the active insert target.
-    pub fn begin_section(&mut self, source_label: &str) {
+    pub fn begin_section(&mut self, source_paths: &[String]) {
+        let key = section_key(source_paths);
         // Insert a placeholder section with a zeroed anchor — will be finalized
         // after the snapshot ID is generated.
         self.sections.insert(
-            source_label.to_string(),
+            key.clone(),
             CacheSection {
                 anchor_snapshot_id: SnapshotId([0u8; 32]),
-                source_paths: Vec::new(),
                 entries: HashMap::new(),
             },
         );
-        self.active_label = Some(source_label.to_string());
+        self.active_label = Some(key);
     }
 
-    /// Set which section `lookup` and `contains` will search.
-    /// Called on the **read** cache before walk begins.
-    pub fn set_active_for_lookup(&mut self, source_label: &str) {
-        self.active_label = Some(source_label.to_string());
+    /// Activate the section matching the given source paths for lookup.
+    /// Returns `true` if a section was found and activated, `false` otherwise.
+    /// When returning `false`, the active label is cleared (no section searched).
+    pub fn activate_for_paths(&mut self, source_paths: &[String]) -> bool {
+        let key = section_key(source_paths);
+        if self.sections.contains_key(&key) {
+            self.active_label = Some(key);
+            true
+        } else {
+            self.active_label = None;
+            false
+        }
     }
 
     /// Clear the active lookup label so no section is searched.
@@ -238,19 +252,18 @@ impl FileCache {
         section.entries.contains_key(&hash_path(path))
     }
 
-    /// Finalize the active section with a snapshot ID and source paths.
+    /// Finalize the active section with a snapshot ID.
     /// Called on the **write** cache after the snapshot ID is generated.
-    pub fn finalize_section(&mut self, snapshot_id: SnapshotId, source_paths: Vec<String>) {
-        let label = self
+    pub fn finalize_section(&mut self, snapshot_id: SnapshotId) {
+        let key = self
             .active_label
             .as_ref()
             .expect("finalize_section called without active section");
         let section = self
             .sections
-            .get_mut(label)
+            .get_mut(key)
             .expect("finalize_section called without active section");
         section.anchor_snapshot_id = snapshot_id;
-        section.source_paths = source_paths;
     }
 
     /// Extract the finalized active section for merging into the persistent cache.
@@ -273,29 +286,18 @@ impl FileCache {
         before - self.sections.len()
     }
 
-    /// Check whether a section exists for the given label AND its stored
-    /// source_paths match the provided paths exactly.
-    pub fn validate_section(&self, source_label: &str, source_paths: &[String]) -> bool {
-        match self.sections.get(source_label) {
-            Some(section) => section.source_paths == source_paths,
-            None => false,
-        }
-    }
-
-    /// Return a human-readable reason why a section is invalid for the given
-    /// label and paths. Returns `None` if the section is valid.
-    pub fn diagnose_section(&self, source_label: &str, source_paths: &[String]) -> Option<String> {
-        match self.sections.get(source_label) {
-            None => Some(format!(
-                "no section for label {:?} (available: {:?})",
-                source_label,
-                self.sections.keys().collect::<Vec<_>>()
-            )),
-            Some(section) if section.source_paths != source_paths => Some(format!(
-                "source paths changed: cached={:?}, current={:?}",
-                section.source_paths, source_paths
-            )),
-            _ => None,
+    /// Return a human-readable reason why no section exists for the given
+    /// source paths. Returns `None` if a matching section exists.
+    pub fn diagnose_section(&self, source_paths: &[String]) -> Option<String> {
+        let key = section_key(source_paths);
+        if self.sections.contains_key(&key) {
+            None
+        } else {
+            Some(format!(
+                "no section for paths {:?} (available sections: {})",
+                source_paths,
+                self.sections.len()
+            ))
         }
     }
 
@@ -396,12 +398,11 @@ impl FileCache {
                     entries = total_entries,
                     "file cache loaded from disk"
                 );
-                for (label, section) in &cache.sections {
+                for (key, section) in &cache.sections {
                     info!(
-                        label,
+                        key,
                         anchor = %hex::encode(&section.anchor_snapshot_id.0[..8]),
                         entries = section.entries.len(),
-                        paths = ?section.source_paths,
                         "file cache section"
                     );
                 }
@@ -614,7 +615,7 @@ mod tests {
     #[test]
     fn section_based_insert_and_lookup() {
         let mut cache = FileCache::new();
-        cache.begin_section("source-1");
+        cache.begin_section(&["/tmp".into()]);
         cache.insert(
             "/tmp/test.txt",
             1,
@@ -633,7 +634,7 @@ mod tests {
     #[test]
     fn lookup_requires_active_section() {
         let mut cache = FileCache::new();
-        cache.begin_section("source-1");
+        cache.begin_section(&["/tmp".into()]);
         cache.insert(
             "/tmp/test.txt",
             1,
@@ -644,13 +645,13 @@ mod tests {
             sample_chunk_refs(),
         );
 
-        // Change active to a different label — should not find the entry.
-        cache.set_active_for_lookup("source-2");
+        // Activate a different path — should not find the entry.
+        assert!(!cache.activate_for_paths(&["/other".into()]));
         let result = cache.lookup("/tmp/test.txt", 1, 1000, 1234567890, 1234567890, 4096);
         assert!(result.is_none());
 
         // Switch back — should find it again.
-        cache.set_active_for_lookup("source-1");
+        assert!(cache.activate_for_paths(&["/tmp".into()]));
         let result = cache.lookup("/tmp/test.txt", 1, 1000, 1234567890, 1234567890, 4096);
         assert!(result.is_some());
     }
@@ -658,7 +659,7 @@ mod tests {
     #[test]
     fn lookup_miss_wrong_path() {
         let mut cache = FileCache::new();
-        cache.begin_section("s");
+        cache.begin_section(&["/tmp".into()]);
         cache.insert(
             "/tmp/test.txt",
             1,
@@ -676,7 +677,7 @@ mod tests {
     #[test]
     fn lookup_miss_changed_mtime() {
         let mut cache = FileCache::new();
-        cache.begin_section("s");
+        cache.begin_section(&["/tmp".into()]);
         cache.insert(
             "/tmp/test.txt",
             1,
@@ -694,7 +695,7 @@ mod tests {
     #[test]
     fn lookup_miss_changed_ctime() {
         let mut cache = FileCache::new();
-        cache.begin_section("s");
+        cache.begin_section(&["/tmp".into()]);
         cache.insert(
             "/tmp/test.txt",
             1,
@@ -712,7 +713,7 @@ mod tests {
     #[test]
     fn lookup_miss_changed_size() {
         let mut cache = FileCache::new();
-        cache.begin_section("s");
+        cache.begin_section(&["/tmp".into()]);
         cache.insert(
             "/tmp/test.txt",
             1,
@@ -730,7 +731,7 @@ mod tests {
     #[test]
     fn lookup_miss_changed_inode() {
         let mut cache = FileCache::new();
-        cache.begin_section("s");
+        cache.begin_section(&["/tmp".into()]);
         cache.insert(
             "/tmp/test.txt",
             1,
@@ -748,7 +749,7 @@ mod tests {
     #[test]
     fn lookup_miss_changed_device() {
         let mut cache = FileCache::new();
-        cache.begin_section("s");
+        cache.begin_section(&["/tmp".into()]);
         cache.insert(
             "/tmp/test.txt",
             1,
@@ -766,7 +767,7 @@ mod tests {
     #[test]
     fn insert_overwrites_existing() {
         let mut cache = FileCache::new();
-        cache.begin_section("s");
+        cache.begin_section(&["/tmp".into()]);
         cache.insert(
             "/tmp/test.txt",
             1,
@@ -806,13 +807,13 @@ mod tests {
     fn independent_sections() {
         let mut cache = FileCache::new();
 
-        cache.begin_section("label-a");
+        cache.begin_section(&["/a".into()]);
         cache.insert("/a/file.txt", 1, 100, 111, 111, 4096, sample_chunk_refs());
 
-        cache.begin_section("label-b");
+        cache.begin_section(&["/b".into()]);
         cache.insert("/b/file.txt", 1, 200, 222, 222, 8192, sample_chunk_refs());
 
-        // Looking up in label-b should not find label-a's entry.
+        // Looking up in /b should not find /a's entry.
         assert!(cache
             .lookup("/a/file.txt", 1, 100, 111, 111, 4096)
             .is_none());
@@ -820,8 +821,8 @@ mod tests {
             .lookup("/b/file.txt", 1, 200, 222, 222, 8192)
             .is_some());
 
-        // Switch to label-a.
-        cache.set_active_for_lookup("label-a");
+        // Switch to /a.
+        assert!(cache.activate_for_paths(&["/a".into()]));
         assert!(cache
             .lookup("/a/file.txt", 1, 100, 111, 111, 4096)
             .is_some());
@@ -838,19 +839,19 @@ mod tests {
         let id_a = SnapshotId([0xAA; 32]);
         let id_b = SnapshotId([0xBB; 32]);
 
+        let key_a = section_key(&["/a".into()]);
+        let key_b = section_key(&["/b".into()]);
         cache.sections.insert(
-            "label-a".into(),
+            key_a.clone(),
             CacheSection {
                 anchor_snapshot_id: id_a,
-                source_paths: vec!["/a".into()],
                 entries: HashMap::new(),
             },
         );
         cache.sections.insert(
-            "label-b".into(),
+            key_b.clone(),
             CacheSection {
                 anchor_snapshot_id: id_b,
-                source_paths: vec!["/b".into()],
                 entries: HashMap::new(),
             },
         );
@@ -858,25 +859,36 @@ mod tests {
         // Only id_a exists — id_b's section should be invalidated.
         let removed = cache.invalidate_missing_snapshots(&|id| *id == id_a);
         assert_eq!(removed, 1);
-        assert!(cache.sections.contains_key("label-a"));
-        assert!(!cache.sections.contains_key("label-b"));
+        assert!(cache.sections.contains_key(&key_a));
+        assert!(!cache.sections.contains_key(&key_b));
     }
 
     #[test]
-    fn validate_section_checks_paths() {
+    fn activate_for_paths_finds_section() {
         let mut cache = FileCache::new();
-        cache.sections.insert(
-            "my-source".into(),
-            CacheSection {
-                anchor_snapshot_id: SnapshotId([0x11; 32]),
-                source_paths: vec!["/data".into(), "/config".into()],
-                entries: HashMap::new(),
-            },
-        );
+        cache.begin_section(&["/data".into(), "/config".into()]);
+        cache.finalize_section(SnapshotId([0x11; 32]));
 
-        assert!(cache.validate_section("my-source", &["/data".into(), "/config".into()]));
-        assert!(!cache.validate_section("my-source", &["/data".into()]));
-        assert!(!cache.validate_section("other", &["/data".into()]));
+        // Exact match activates.
+        assert!(cache.activate_for_paths(&["/data".into(), "/config".into()]));
+        // Subset does not match.
+        assert!(!cache.activate_for_paths(&["/data".into()]));
+        // Unrelated paths do not match.
+        assert!(!cache.activate_for_paths(&["/other".into()]));
+    }
+
+    #[test]
+    fn activate_for_paths_is_label_independent() {
+        // Sections are keyed by paths, not label — any label that produced
+        // the same paths will find the same section.
+        let mut cache = FileCache::new();
+        cache.begin_section(&["/data".into()]);
+        cache.insert("/data/a.txt", 1, 1, 1, 1, 100, sample_chunk_refs());
+        cache.finalize_section(SnapshotId([0x22; 32]));
+
+        // Activate by the same paths (regardless of what label was used).
+        assert!(cache.activate_for_paths(&["/data".into()]));
+        assert!(cache.lookup("/data/a.txt", 1, 1, 1, 1, 100).is_some());
     }
 
     #[test]
@@ -885,38 +897,64 @@ mod tests {
         let id_a = SnapshotId([0xAA; 32]);
         let id_b = SnapshotId([0xBB; 32]);
 
+        let key_a = section_key(&["/a".into()]);
+        let key_b = section_key(&["/b".into()]);
         cache.sections.insert(
-            "label-a".into(),
+            key_a.clone(),
             CacheSection {
                 anchor_snapshot_id: id_a,
-                source_paths: vec![],
                 entries: HashMap::new(),
             },
         );
 
         let new_section = CacheSection {
             anchor_snapshot_id: id_b,
-            source_paths: vec!["/new".into()],
             entries: HashMap::new(),
         };
-        cache.merge_section("label-b", new_section);
+        cache.merge_section(&key_b, new_section);
 
         assert_eq!(cache.sections.len(), 2);
-        assert!(cache.sections.contains_key("label-a"));
-        assert!(cache.sections.contains_key("label-b"));
+        assert!(cache.sections.contains_key(&key_a));
+        assert!(cache.sections.contains_key(&key_b));
+    }
+
+    #[test]
+    fn merge_section_overwrites_same_paths() {
+        let mut cache = FileCache::new();
+        let id_old = SnapshotId([0xAA; 32]);
+        let id_new = SnapshotId([0xBB; 32]);
+        let key = section_key(&["/data".into()]);
+
+        cache.sections.insert(
+            key.clone(),
+            CacheSection {
+                anchor_snapshot_id: id_old,
+                entries: HashMap::new(),
+            },
+        );
+
+        let new_section = CacheSection {
+            anchor_snapshot_id: id_new,
+            entries: HashMap::new(),
+        };
+        cache.merge_section(&key, new_section);
+
+        // Only one section — natural key overwrite, no duplicates.
+        assert_eq!(cache.sections.len(), 1);
+        assert_eq!(cache.sections[&key].anchor_snapshot_id, id_new);
     }
 
     #[test]
     fn take_active_section() {
         let mut cache = FileCache::new();
-        cache.begin_section("test");
+        cache.begin_section(&["/src".into()]);
         cache.insert("/a.txt", 1, 1, 1, 1, 100, sample_chunk_refs());
-        cache.finalize_section(SnapshotId([0x42; 32]), vec!["/src".into()]);
+        cache.finalize_section(SnapshotId([0x42; 32]));
 
         let taken = cache.take_active_section();
         assert!(taken.is_some());
-        let (label, section) = taken.unwrap();
-        assert_eq!(label, "test");
+        let (key, section) = taken.unwrap();
+        assert_eq!(key, section_key(&["/src".into()]));
         assert_eq!(section.entries.len(), 1);
         assert_eq!(section.anchor_snapshot_id, SnapshotId([0x42; 32]));
         assert!(cache.sections.is_empty());
@@ -925,7 +963,7 @@ mod tests {
     #[test]
     fn contains_checks_active_section() {
         let mut cache = FileCache::new();
-        cache.begin_section("s");
+        cache.begin_section(&["/tmp".into()]);
         cache.insert("/a.txt", 1, 1, 1, 1, 100, sample_chunk_refs());
 
         assert!(cache.contains("/a.txt"));
@@ -935,7 +973,7 @@ mod tests {
     #[test]
     fn round_trip_serialization() {
         let mut cache = FileCache::new();
-        cache.begin_section("source-1");
+        cache.begin_section(&["/tmp".into()]);
         for i in 0..10 {
             cache.insert(
                 &format!("/tmp/file_{i}.txt"),
@@ -947,13 +985,14 @@ mod tests {
                 sample_chunk_refs(),
             );
         }
-        cache.finalize_section(SnapshotId([0xDD; 32]), vec!["/tmp".into()]);
+        cache.finalize_section(SnapshotId([0xDD; 32]));
 
+        let key = section_key(&["/tmp".into()]);
         let plaintext = rmp_serde::to_vec(&cache).unwrap();
         let decoded = FileCache::decode_from_plaintext(&plaintext).unwrap();
         assert_eq!(decoded.sections.len(), 1);
-        assert!(decoded.sections.contains_key("source-1"));
-        let section = &decoded.sections["source-1"];
+        assert!(decoded.sections.contains_key(&key));
+        let section = &decoded.sections[&key];
         assert_eq!(section.entries.len(), 10);
         assert_eq!(section.anchor_snapshot_id, SnapshotId([0xDD; 32]));
     }

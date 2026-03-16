@@ -591,3 +591,173 @@ fn restore_works_without_restore_cache() {
         "hello"
     );
 }
+
+// ---------------------------------------------------------------------------
+// File cache: key by source paths, not label
+// ---------------------------------------------------------------------------
+
+/// Compute the local file cache path for a given repo ID.
+fn filecache_path(repo_id: &[u8]) -> std::path::PathBuf {
+    let cache_base = std::env::var("XDG_CACHE_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap();
+    cache_base
+        .join("vykar")
+        .join(hex::encode(repo_id))
+        .join("filecache")
+}
+
+/// Integration test A: local file cache survives a label rename.
+///
+/// Backup with "old-label", then backup the same paths under "new-label".
+/// All files should hit the cache (status: Unchanged).
+#[test]
+fn file_cache_survives_label_rename() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo_dir = tmp.path().join("repo");
+    let source_dir = tmp.path().join("source");
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    std::fs::create_dir_all(&source_dir).unwrap();
+    std::fs::write(source_dir.join("a.txt"), b"alpha").unwrap();
+    std::fs::write(source_dir.join("b.txt"), b"bravo").unwrap();
+
+    let config = make_test_config(&repo_dir);
+    commands::init::run(&config, None).unwrap();
+
+    // First backup with "old-label".
+    backup_source(&config, &source_dir, "old-label", "snap-old", None);
+
+    // Second backup with "new-label", same paths, same files.
+    let source_paths = vec![source_dir.to_string_lossy().to_string()];
+    let exclude_patterns: Vec<String> = Vec::new();
+    let exclude_if_present: Vec<String> = Vec::new();
+
+    let mut events = Vec::new();
+    let mut on_progress = |event: commands::backup::BackupProgressEvent| events.push(event);
+
+    commands::backup::run_with_progress(
+        &config,
+        commands::backup::BackupRequest {
+            snapshot_name: "snap-new",
+            passphrase: None,
+            source_paths: &source_paths,
+            source_label: "new-label",
+            exclude_patterns: &exclude_patterns,
+            exclude_if_present: &exclude_if_present,
+            one_file_system: true,
+            git_ignore: false,
+            xattrs_enabled: false,
+            compression: Compression::None,
+            command_dumps: &[],
+            verbose: true,
+        },
+        Some(&mut on_progress),
+        None,
+    )
+    .unwrap();
+
+    // All FileProcessed events should be Unchanged (cache hit).
+    let file_events: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            commands::backup::BackupProgressEvent::FileProcessed { path, status, .. } => {
+                Some((path.clone(), *status))
+            }
+            _ => None,
+        })
+        .collect();
+
+    assert!(
+        !file_events.is_empty(),
+        "expected FileProcessed events but got none"
+    );
+    for (path, status) in &file_events {
+        assert_eq!(
+            *status,
+            commands::backup::FileStatus::Unchanged,
+            "file {path} should be Unchanged (cache hit) but was {status:?}"
+        );
+    }
+}
+
+/// Integration test B: parent fallback survives a label rename.
+///
+/// Backup with "old-label", delete local file cache, then backup the same
+/// paths under "new-label". The parent snapshot filter uses paths only, so
+/// the parent fallback should still produce Unchanged status for all files.
+#[test]
+fn parent_fallback_survives_label_rename() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo_dir = tmp.path().join("repo");
+    let source_dir = tmp.path().join("source");
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    std::fs::create_dir_all(&source_dir).unwrap();
+    std::fs::write(source_dir.join("a.txt"), b"alpha").unwrap();
+    std::fs::write(source_dir.join("b.txt"), b"bravo").unwrap();
+
+    let config = make_test_config(&repo_dir);
+    commands::init::run(&config, None).unwrap();
+
+    // First backup with "old-label".
+    backup_source(&config, &source_dir, "old-label", "snap-old", None);
+
+    // Delete the local file cache to force a cold start (parent fallback path).
+    {
+        let repo = open_local_repo(&repo_dir, None);
+        let filecache = filecache_path(&repo.config.id);
+        drop(repo);
+        let _ = std::fs::remove_file(&filecache);
+    }
+
+    // Second backup with "new-label", same paths, same files.
+    let source_paths = vec![source_dir.to_string_lossy().to_string()];
+    let exclude_patterns: Vec<String> = Vec::new();
+    let exclude_if_present: Vec<String> = Vec::new();
+
+    let mut events = Vec::new();
+    let mut on_progress = |event: commands::backup::BackupProgressEvent| events.push(event);
+
+    commands::backup::run_with_progress(
+        &config,
+        commands::backup::BackupRequest {
+            snapshot_name: "snap-new",
+            passphrase: None,
+            source_paths: &source_paths,
+            source_label: "new-label",
+            exclude_patterns: &exclude_patterns,
+            exclude_if_present: &exclude_if_present,
+            one_file_system: true,
+            git_ignore: false,
+            xattrs_enabled: false,
+            compression: Compression::None,
+            command_dumps: &[],
+            verbose: true,
+        },
+        Some(&mut on_progress),
+        None,
+    )
+    .unwrap();
+
+    // All FileProcessed events should be Unchanged (parent fallback hit).
+    let file_events: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            commands::backup::BackupProgressEvent::FileProcessed { path, status, .. } => {
+                Some((path.clone(), *status))
+            }
+            _ => None,
+        })
+        .collect();
+
+    assert!(
+        !file_events.is_empty(),
+        "expected FileProcessed events but got none"
+    );
+    for (path, status) in &file_events {
+        assert_eq!(
+            *status,
+            commands::backup::FileStatus::Unchanged,
+            "file {path} should be Unchanged (parent fallback hit) but was {status:?}"
+        );
+    }
+}

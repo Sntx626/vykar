@@ -343,24 +343,15 @@ pub fn run_with_progress(
         // Set up read cache + write cache sections for filesystem sources.
         let mut parent_reuse_index: Option<ParentReuseIndex> = None;
         if !source_paths.is_empty() {
-            let section_valid = repo
-                .file_cache()
-                .validate_section(source_label, source_paths);
+            let section_valid = repo.file_cache_mut().activate_for_paths(source_paths);
 
             if section_valid {
                 info!(
                     source_label,
                     "file cache: section valid, using cached metadata"
                 );
-                repo.file_cache_mut().set_active_for_lookup(source_label);
-            } else {
-                if let Some(reason) = repo
-                    .file_cache()
-                    .diagnose_section(source_label, source_paths)
-                {
-                    info!(source_label, reason = %reason, "file cache: section invalid, cold start");
-                }
-                repo.file_cache_mut().clear_active_for_lookup();
+            } else if let Some(reason) = repo.file_cache().diagnose_section(source_paths) {
+                info!(source_label, reason = %reason, "file cache: section invalid, cold start");
             }
 
             if !section_valid {
@@ -371,7 +362,7 @@ pub fn run_with_progress(
                     .manifest()
                     .snapshots
                     .iter()
-                    .filter(|s| s.source_label == source_label && s.source_paths == source_paths)
+                    .filter(|s| s.source_paths == source_paths)
                     .max_by_key(|s| s.time);
                 if let Some(parent_entry) = latest {
                     let parent_name = parent_entry.name.clone();
@@ -422,7 +413,7 @@ pub fn run_with_progress(
 
         // Prepare write cache: create empty section for inserts.
         if !source_paths.is_empty() {
-            new_file_cache.begin_section(source_label);
+            new_file_cache.begin_section(source_paths);
         }
 
         // Execute command dumps before walking filesystem.
@@ -553,7 +544,7 @@ pub fn run_with_progress(
 
         // Finalize the write cache section with the snapshot ID.
         if !source_paths.is_empty() {
-            new_file_cache.finalize_section(snapshot_id, source_paths.to_vec());
+            new_file_cache.finalize_section(snapshot_id);
         }
         let meta_bytes = rmp_serde::to_vec(&snapshot_meta)?;
         let snapshot_packed = pack_object_with_context(
