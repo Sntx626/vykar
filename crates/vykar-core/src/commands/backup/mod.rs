@@ -366,7 +366,7 @@ pub fn run_with_progress(
                     .manifest()
                     .snapshots
                     .iter()
-                    .filter(|s| s.source_paths == source_paths)
+                    .filter(|s| source_paths_match(&s.source_paths, source_paths))
                     .max_by_key(|s| s.time);
                 if let Some(parent_entry) = latest {
                     let parent_name = parent_entry.name.clone();
@@ -399,6 +399,11 @@ pub fn run_with_progress(
                             );
                         }
                     }
+                } else {
+                    info!(
+                        source_label,
+                        "no parent snapshot found for cold-start fallback"
+                    );
                 }
             }
         }
@@ -653,4 +658,56 @@ pub fn run_with_progress(
 
     let is_partial = stats.errors > 0;
     Ok(BackupOutcome { stats, is_partial })
+}
+
+/// Order-independent comparison of source path lists.
+fn source_paths_match(a: &[String], b: &[String]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut sorted_a: Vec<&str> = a.iter().map(|s| s.as_str()).collect();
+    let mut sorted_b: Vec<&str> = b.iter().map(|s| s.as_str()).collect();
+    sorted_a.sort();
+    sorted_b.sort();
+    sorted_a == sorted_b
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_paths_match_order_independent() {
+        let a = vec!["/b".to_string(), "/a".to_string()];
+        let b = vec!["/a".to_string(), "/b".to_string()];
+        assert!(source_paths_match(&a, &b));
+    }
+
+    #[test]
+    fn source_paths_match_different_lengths() {
+        let a = vec!["/a".to_string()];
+        let b = vec!["/a".to_string(), "/b".to_string()];
+        assert!(!source_paths_match(&a, &b));
+    }
+
+    #[test]
+    fn source_paths_match_empty_vs_nonempty() {
+        let a: Vec<String> = vec![];
+        let b = vec!["/a".to_string()];
+        assert!(!source_paths_match(&a, &b));
+    }
+
+    #[test]
+    fn source_paths_match_both_empty() {
+        let a: Vec<String> = vec![];
+        let b: Vec<String> = vec![];
+        assert!(source_paths_match(&a, &b));
+    }
+
+    #[test]
+    fn source_paths_match_identical_order() {
+        let a = vec!["/a".to_string(), "/b".to_string()];
+        let b = vec!["/a".to_string(), "/b".to_string()];
+        assert!(source_paths_match(&a, &b));
+    }
 }
