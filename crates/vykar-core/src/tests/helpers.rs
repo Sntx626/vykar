@@ -4,9 +4,10 @@ use std::sync::Once;
 use crate::commands;
 use crate::compress::Compression;
 use crate::config::{
-    ChunkerConfig, CompactConfig, CompressionConfig, EncryptionConfig, EncryptionModeConfig,
-    HooksConfig, RepositoryConfig, ResolvedRepo, ResourceLimitsConfig, RetentionConfig,
-    RetryConfig, ScheduleConfig, SourceEntry, SourceHooksConfig, VykarConfig, XattrsConfig,
+    CheckConfig, ChunkerConfig, CompactConfig, CompressionConfig, EncryptionConfig,
+    EncryptionModeConfig, HooksConfig, RepositoryConfig, ResolvedRepo, ResourceLimitsConfig,
+    RetentionConfig, RetryConfig, ScheduleConfig, SourceEntry, SourceHooksConfig, VykarConfig,
+    XattrsConfig,
 };
 use crate::repo::Repository;
 use crate::snapshot::SnapshotStats;
@@ -62,6 +63,7 @@ pub fn make_test_config(repo_dir: &Path) -> VykarConfig {
         schedule: ScheduleConfig::default(),
         limits: ResourceLimitsConfig::default(),
         compact: CompactConfig::default(),
+        check: CheckConfig::default(),
         cache_dir: None,
         trust_repo: false,
         hostname_override: None,

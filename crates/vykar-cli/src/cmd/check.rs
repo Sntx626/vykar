@@ -143,6 +143,8 @@ fn run_check_readonly(
             verify_data,
             distrust_server,
             Some(&mut make_progress_callback()),
+            100,   // standalone always 100%
+            false, // don't update daemon's full_every timer
         )
         .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })
     })?;

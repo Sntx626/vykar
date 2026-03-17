@@ -158,9 +158,16 @@ fn check_with_progress_emits_phase_events() {
     let mut events = Vec::new();
     let mut on_progress = |event| events.push(event);
 
-    let result =
-        commands::check::run_with_progress(&config, None, false, false, Some(&mut on_progress))
-            .unwrap();
+    let result = commands::check::run_with_progress(
+        &config,
+        None,
+        false,
+        false,
+        Some(&mut on_progress),
+        100,
+        false,
+    )
+    .unwrap();
     assert!(result.errors.is_empty());
     assert!(!events.is_empty());
     assert!(events.iter().any(|e| matches!(

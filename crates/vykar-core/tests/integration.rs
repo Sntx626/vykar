@@ -1,9 +1,9 @@
 use vykar_core::commands;
 use vykar_core::compress::Compression;
 use vykar_core::config::{
-    ChunkerConfig, CompactConfig, CompressionConfig, EncryptionConfig, EncryptionModeConfig,
-    RepositoryConfig, ResourceLimitsConfig, RetentionConfig, RetryConfig, ScheduleConfig,
-    VykarConfig, XattrsConfig,
+    CheckConfig, ChunkerConfig, CompactConfig, CompressionConfig, EncryptionConfig,
+    EncryptionModeConfig, RepositoryConfig, ResourceLimitsConfig, RetentionConfig, RetryConfig,
+    ScheduleConfig, VykarConfig, XattrsConfig,
 };
 use vykar_core::repo::pack::PackType;
 use vykar_core::repo::{EncryptionMode, Repository};
@@ -82,6 +82,7 @@ fn make_test_config(repo_dir: &std::path::Path) -> VykarConfig {
         schedule: ScheduleConfig::default(),
         limits: ResourceLimitsConfig::default(),
         compact: CompactConfig::default(),
+        check: CheckConfig::default(),
         cache_dir: None,
         trust_repo: false,
         hostname_override: None,

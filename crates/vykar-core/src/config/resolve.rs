@@ -150,6 +150,8 @@ struct ConfigDocument {
     limits: ResourceLimitsConfig,
     #[serde(default)]
     compact: CompactConfig,
+    #[serde(default)]
+    check: CheckConfig,
     /// Global hooks — apply to all repositories.
     #[serde(default)]
     hooks: HooksConfig,
@@ -342,6 +344,7 @@ fn resolve_document(mut raw: ConfigDocument) -> vykar_types::error::Result<Vec<R
     raw.limits.validate()?;
     raw.chunker.validate()?;
     raw.compact.validate();
+    raw.check.validate()?;
 
     // Validate per-repo hooks
     for entry in &raw.repositories {
@@ -443,6 +446,7 @@ fn resolve_document(mut raw: ConfigDocument) -> vykar_types::error::Result<Vec<R
                     schedule: raw.schedule.clone(),
                     limits: entry.limits.unwrap_or_else(|| raw.limits.clone()),
                     compact: raw.compact.clone(),
+                    check: raw.check.clone(),
                     cache_dir: raw
                         .cache_dir
                         .as_deref()
@@ -1246,6 +1250,7 @@ repositories:
                 schedule: ScheduleConfig::default(),
                 limits: ResourceLimitsConfig::default(),
                 compact: CompactConfig::default(),
+                check: CheckConfig::default(),
                 cache_dir: None,
                 trust_repo: false,
                 hostname_override: None,

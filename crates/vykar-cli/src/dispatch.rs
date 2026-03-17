@@ -171,24 +171,26 @@ fn print_step_details(result: &FullCycleResult) {
         }
     }
 
-    // Check results
+    // Check results (skip summary if check was skipped — the step outcome table already shows it)
     if let Some(ref result) = result.check_result {
-        if !result.errors.is_empty() {
-            println!("Errors found:");
-            for err in &result.errors {
-                println!("  [{}] {}", err.context, err.message);
+        if !result.skipped {
+            if !result.errors.is_empty() {
+                println!("Errors found:");
+                for err in &result.errors {
+                    println!("  [{}] {}", err.context, err.message);
+                }
+                println!();
             }
-            println!();
+            println!(
+                "Check complete: {} snapshots, {} items, {} packs existence-checked ({} chunks), {} chunks data-verified, {} errors",
+                result.snapshots_checked,
+                result.items_checked,
+                result.packs_existence_checked,
+                result.chunks_existence_checked,
+                result.chunks_data_verified,
+                result.errors.len(),
+            );
         }
-        println!(
-            "Check complete: {} snapshots, {} items, {} packs existence-checked ({} chunks), {} chunks data-verified, {} errors",
-            result.snapshots_checked,
-            result.items_checked,
-            result.packs_existence_checked,
-            result.chunks_existence_checked,
-            result.chunks_data_verified,
-            result.errors.len(),
-        );
     }
 }
 

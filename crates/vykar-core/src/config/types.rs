@@ -34,6 +34,8 @@ pub struct VykarConfig {
     pub limits: ResourceLimitsConfig,
     #[serde(default)]
     pub compact: CompactConfig,
+    #[serde(default)]
+    pub check: CheckConfig,
     /// Root directory for all local caches and pack temp files.
     /// Default: platform cache dir + "vykar" (e.g. ~/.cache/vykar/).
     #[serde(default)]
@@ -393,6 +395,64 @@ impl CompactConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CheckConfig {
+    /// Percentage of packs/snapshots to verify per cycle (0–100).
+    /// 0 = skip partial checks; only full_every triggers checks.
+    #[serde(default)]
+    pub max_percent: u8,
+    /// Run a full 100% check on this interval (e.g. "60d").
+    /// Overrides max_percent to 100 when due.
+    #[serde(
+        default = "default_check_full_every",
+        deserialize_with = "deserialize_optional_duration_string"
+    )]
+    pub full_every: Option<String>,
+}
+
+fn default_check_full_every() -> Option<String> {
+    Some("60d".to_string())
+}
+
+impl Default for CheckConfig {
+    fn default() -> Self {
+        Self {
+            max_percent: 0,
+            full_every: default_check_full_every(),
+        }
+    }
+}
+
+impl CheckConfig {
+    pub fn full_every_duration(&self) -> Option<Duration> {
+        self.full_every
+            .as_deref()
+            .and_then(|s| super::defaults::parse_human_duration(s).ok())
+    }
+
+    pub fn validate(&self) -> vykar_types::error::Result<()> {
+        use vykar_types::error::VykarError;
+
+        if self.max_percent > 100 {
+            return Err(VykarError::Config(format!(
+                "check.max_percent must be 0–100, got {}",
+                self.max_percent
+            )));
+        }
+
+        if let Some(ref raw) = self.full_every {
+            super::defaults::parse_human_duration(raw).map_err(|_| {
+                VykarError::Config(format!(
+                    "check.full_every: invalid duration '{raw}' (use s/m/h/d)"
+                ))
+            })?;
+        }
+
+        Ok(())
+    }
+}
+
 // RetryConfig is defined in vykar-storage; re-exported here for ergonomic config construction.
 pub use vykar_storage::RetryConfig;
 
@@ -453,6 +513,43 @@ mod tests {
             .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("expected 5 fields"), "got: {msg}");
+    }
+
+    #[test]
+    fn check_config_defaults() {
+        let cfg = CheckConfig::default();
+        assert_eq!(cfg.max_percent, 0);
+        assert_eq!(cfg.full_every.as_deref(), Some("60d"));
+        assert!(cfg.full_every_duration().is_some());
+    }
+
+    #[test]
+    fn check_config_validate_rejects_over_100() {
+        let cfg = CheckConfig {
+            max_percent: 101,
+            full_every: None,
+        };
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("max_percent"), "got: {err}");
+    }
+
+    #[test]
+    fn check_config_validate_rejects_bad_duration() {
+        let cfg = CheckConfig {
+            max_percent: 50,
+            full_every: Some("bad".into()),
+        };
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("full_every"), "got: {err}");
+    }
+
+    #[test]
+    fn check_config_validate_accepts_none_full_every() {
+        let cfg = CheckConfig {
+            max_percent: 50,
+            full_every: None,
+        };
+        assert!(cfg.validate().is_ok());
     }
 
     #[test]

@@ -449,8 +449,9 @@ pub fn run_full_cycle_for_repo(
         }
     }
 
-    // 4. Check (metadata-only)
+    // 4. Check (metadata-only, with sampling support)
     if !shutting_down(shutdown) {
+        let check_max_percent = config.check.max_percent;
         check_result = run_hooked_step(
             CycleStep::Check,
             repo,
@@ -463,10 +464,14 @@ pub fn run_full_cycle_for_repo(
                     false,
                     false,
                     Some(&mut |check_evt| evt(CycleEvent::Check(check_evt))),
+                    check_max_percent,
+                    true, // record_state: daemon/GUI updates the full_every timer
                 )
             },
             |result| {
-                if result.errors.is_empty() {
+                if result.skipped {
+                    StepOutcome::Skipped("check not due".into())
+                } else if result.errors.is_empty() {
                     StepOutcome::Ok
                 } else {
                     StepOutcome::Failed(format!("check found {} error(s)", result.errors.len()))
@@ -535,7 +540,9 @@ fn run_hooked_step<T>(
     };
 
     if let Some(ref mut ctx) = hook_ctx {
-        let success = outcome.is_success();
+        // Skipped is not a failure — treat it as success for the hook lifecycle
+        // so that `after` hooks fire (not `failed`), and `finally` always runs.
+        let success = outcome.is_success() || matches!(outcome, StepOutcome::Skipped(_));
         if let Some(msg) = outcome.error_msg() {
             if ctx.error.is_none() {
                 ctx.error = Some(msg.to_string());
@@ -647,7 +654,15 @@ pub fn check_repo_with_progress(
     verify_data: bool,
     progress: &mut dyn FnMut(commands::check::CheckProgressEvent),
 ) -> Result<commands::check::CheckResult> {
-    commands::check::run_with_progress(config, passphrase, verify_data, false, Some(progress))
+    commands::check::run_with_progress(
+        config,
+        passphrase,
+        verify_data,
+        false,
+        Some(progress),
+        100,
+        false,
+    )
 }
 
 pub fn delete_snapshot(

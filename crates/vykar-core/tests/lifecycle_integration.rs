@@ -5,7 +5,7 @@ use std::time::Duration;
 use vykar_core::commands;
 use vykar_core::compress::Compression;
 use vykar_core::config::{
-    ChunkerConfig, CommandDump, CompactConfig, CompressionConfig, EncryptionConfig,
+    CheckConfig, ChunkerConfig, CommandDump, CompactConfig, CompressionConfig, EncryptionConfig,
     EncryptionModeConfig, RepositoryConfig, ResourceLimitsConfig, RetentionConfig, RetryConfig,
     ScheduleConfig, SourceEntry, SourceHooksConfig, VykarConfig, XattrsConfig,
 };
@@ -65,6 +65,7 @@ fn make_test_config(repo_dir: &Path) -> VykarConfig {
         schedule: ScheduleConfig::default(),
         limits: ResourceLimitsConfig::default(),
         compact: CompactConfig::default(),
+        check: CheckConfig::default(),
         cache_dir: None,
         trust_repo: false,
         hostname_override: None,

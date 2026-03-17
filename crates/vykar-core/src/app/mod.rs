@@ -3,6 +3,7 @@ use std::path::Path;
 use crate::config::{self, ConfigSource, ResolvedRepo, ScheduleConfig};
 use vykar_types::error::{Result, VykarError};
 
+pub(crate) mod check_state;
 pub mod operations;
 pub mod passphrase;
 pub mod scheduler;

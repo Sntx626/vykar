@@ -390,6 +390,25 @@ compact:
   threshold: 20                      # Minimum % unused space to trigger repack (default 20)
 ```
 
+## Check
+
+Control the integrity check step during scheduled/daemon backup cycles. Standalone `vykar check` always runs a full 100% check regardless of these settings.
+
+```yaml
+check:
+  max_percent: 0                     # % of packs/snapshots to verify per cycle (0-100, default: 0)
+  full_every: "60d"                  # Full 100% check interval (default: "60d")
+```
+
+| Field          | Default | Description |
+|----------------|---------|-------------|
+| `max_percent`  | `0`     | Percentage of packs and snapshots to verify on each scheduled cycle. `0` means no partial checks are run — only `full_every` triggers checks. |
+| `full_every`   | `"60d"` | Run a full 100% check at this interval. Accepts duration suffixes: `s`, `m`, `h`, `d`. When due, overrides `max_percent` to 100. Set to `null` to disable periodic full checks entirely. |
+
+**How it works:** On each daemon/GUI cycle, vykar checks a local timestamp file to determine whether a full check is due. If `full_every` is due (or the timestamp is missing/corrupt), a full 100% check runs and the timestamp is updated. Otherwise, if `max_percent > 0`, a random sample of that percentage of packs and snapshots is verified. If `max_percent` is 0 and `full_every` is not yet due, the check step is skipped entirely (no index loaded).
+
+Standalone `vykar check` always runs at 100% and does not update the daemon's timer — manual checks don't reset the schedule.
+
 ## Limits
 
 ```yaml

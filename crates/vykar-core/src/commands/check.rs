@@ -49,6 +49,8 @@ pub struct CheckResult {
     pub packs_existence_checked: usize,
     pub chunks_data_verified: usize,
     pub errors: Vec<CheckError>,
+    /// True when the check was skipped entirely (e.g. max_percent=0 and full_every not due).
+    pub skipped: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -306,18 +308,68 @@ pub fn run(
     verify_data: bool,
     distrust_server: bool,
 ) -> Result<CheckResult> {
-    run_with_progress(config, passphrase, verify_data, distrust_server, None)
+    run_with_progress(
+        config,
+        passphrase,
+        verify_data,
+        distrust_server,
+        None,
+        100,
+        false,
+    )
 }
 
+/// Run check with progress reporting.
+///
+/// `max_percent`: percentage of packs/snapshots to check (0–100). 100 = full check.
+/// `record_state`: if true and a full (100%) check succeeds, record the timestamp
+///   in the local check state file. Standalone CLI passes false; daemon/GUI passes true.
 pub fn run_with_progress(
     config: &VykarConfig,
     passphrase: Option<&str>,
     verify_data: bool,
     distrust_server: bool,
     mut progress: Option<&mut dyn FnMut(CheckProgressEvent)>,
+    max_percent: u8,
+    record_state: bool,
 ) -> Result<CheckResult> {
+    let cache_dir = config.cache_dir.as_deref().map(std::path::Path::new);
+    let full_every_dur = config.check.full_every_duration();
+
+    // Pre-open early exit: if max_percent=0 and no full_every configured,
+    // skip without opening the repo at all.
+    if max_percent == 0 && full_every_dur.is_none() {
+        return Ok(skipped_result());
+    }
+
+    // Open repo (needed for fingerprint check and actual scan).
     let (mut repo, _session_guard) =
         super::util::open_repo_with_read_session(config, passphrase, true, false)?;
+
+    // Determine effective check percentage using repo fingerprint.
+    let fingerprint = compute_repo_fingerprint(&repo);
+    let effective = if max_percent == 100 {
+        100
+    } else if let Some(ref interval) = full_every_dur {
+        if crate::app::check_state::full_check_is_due(
+            &config.repository.url,
+            &fingerprint,
+            cache_dir,
+            *interval,
+        ) {
+            100
+        } else {
+            max_percent
+        }
+    } else {
+        max_percent
+    };
+
+    // Early exit: nothing to check this cycle.
+    if effective == 0 {
+        return Ok(skipped_result());
+    }
+
     repo.load_chunk_index_uncached()?;
 
     // Build per-pack grouping from chunk index (needed for server verify).
@@ -329,9 +381,33 @@ pub fn run_with_progress(
             .push((*chunk_id, *entry));
     }
 
+    // If sampling (effective < 100), select a subset of packs.
+    let sampled_out: HashSet<PackId> = if effective < 100 {
+        sample_packs_out(&pack_chunks, effective)
+    } else {
+        HashSet::new()
+    };
+
+    // Filter pack_chunks for server verify to only include sampled-in packs.
+    let verify_pack_chunks: HashMap<PackId, Vec<(ChunkId, ChunkIndexEntry)>> =
+        if sampled_out.is_empty() {
+            pack_chunks.clone()
+        } else {
+            pack_chunks
+                .iter()
+                .filter(|(pid, _)| !sampled_out.contains(pid))
+                .map(|(pid, chunks)| (*pid, chunks.clone()))
+                .collect()
+        };
+
     // Try server-side verify for both existence and data checks.
     let server_outcome = if !distrust_server {
-        try_server_verify(&repo.storage, &pack_chunks, verify_data, &mut progress)
+        try_server_verify(
+            &repo.storage,
+            &verify_pack_chunks,
+            verify_data,
+            &mut progress,
+        )
     } else {
         ServerVerifyOutcome::Fallback
     };
@@ -348,10 +424,20 @@ pub fn run_with_progress(
             ServerVerifyOutcome::Fallback => (HashSet::new(), 0, 0, Vec::new()),
         };
 
-    let skip = if verified_packs.is_empty() {
+    // Combined skip set: sampled_out + server-verified packs.
+    let mut combined_skip = sampled_out;
+    combined_skip.extend(verified_packs.iter());
+    let skip = if combined_skip.is_empty() {
         None
     } else {
-        Some(&verified_packs)
+        Some(&combined_skip)
+    };
+
+    // Sample snapshots if effective < 100.
+    let snapshot_sample_percent = if effective < 100 {
+        Some(effective)
+    } else {
+        None
     };
 
     let scan = integrity_scan(
@@ -362,22 +448,86 @@ pub fn run_with_progress(
             detect_orphans: false,
             verify_data,
             skip_packs: skip,
+            snapshot_sample_percent,
         },
         &mut progress,
     )?;
 
+    // Compute server-verified chunk count for existence counter.
+    let srv_chunks_existence: usize = verified_packs
+        .iter()
+        .filter_map(|p| pack_chunks.get(p))
+        .map(|c| c.len())
+        .sum();
+
     let mut errors: Vec<CheckError> = srv_errors;
     errors.extend(scan.issues.iter().map(|i| i.to_check_error()));
 
-    Ok(CheckResult {
+    let result = CheckResult {
         snapshots_checked: scan.counters.snapshots_checked,
         items_checked: scan.counters.items_checked,
-        chunks_existence_checked: scan.counters.chunks_existence_checked,
+        chunks_existence_checked: scan.counters.chunks_existence_checked + srv_chunks_existence,
         packs_existence_checked: scan.counters.packs_existence_checked + srv_packs_responded,
         chunks_data_verified: scan.counters.chunks_data_verified
             + if verify_data { srv_chunks_verified } else { 0 },
         errors,
-    })
+        skipped: false,
+    };
+
+    // Record full check timestamp if this was a 100% run and succeeded.
+    if record_state && effective == 100 && result.errors.is_empty() {
+        crate::app::check_state::record_full_check(&config.repository.url, &fingerprint, cache_dir);
+    }
+
+    Ok(result)
+}
+
+fn skipped_result() -> CheckResult {
+    CheckResult {
+        snapshots_checked: 0,
+        items_checked: 0,
+        chunks_existence_checked: 0,
+        packs_existence_checked: 0,
+        chunks_data_verified: 0,
+        errors: Vec::new(),
+        skipped: true,
+    }
+}
+
+/// Compute a hex fingerprint from the repo's identity material.
+fn compute_repo_fingerprint(repo: &crate::repo::Repository) -> String {
+    let fp =
+        crate::repo::identity::compute_fingerprint(&repo.config.id, repo.crypto.chunk_id_key());
+    hex::encode(fp)
+}
+
+/// Select which packs to skip (sample out) for a partial check.
+/// Returns the set of pack IDs that should NOT be checked.
+fn sample_packs_out(
+    pack_chunks: &HashMap<PackId, Vec<(ChunkId, ChunkIndexEntry)>>,
+    percent: u8,
+) -> HashSet<PackId> {
+    use rand::seq::index::sample;
+
+    let total = pack_chunks.len();
+    if total == 0 || percent >= 100 {
+        return HashSet::new();
+    }
+
+    let keep = (total as u64 * percent as u64).div_ceil(100) as usize;
+    let keep = keep.max(1).min(total);
+
+    let pack_ids: Vec<PackId> = pack_chunks.keys().copied().collect();
+    let mut rng = rand::thread_rng();
+    let indices = sample(&mut rng, total, keep);
+
+    let kept: HashSet<usize> = indices.into_iter().collect();
+    pack_ids
+        .into_iter()
+        .enumerate()
+        .filter(|(i, _)| !kept.contains(i))
+        .map(|(_, pid)| pid)
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -639,6 +789,8 @@ struct ScanOptions<'a> {
     verify_data: bool,
     /// Packs already verified server-side — skip existence and data checks for these.
     skip_packs: Option<&'a HashSet<PackId>>,
+    /// If set, sample only this percentage of snapshots in Phase 1.
+    snapshot_sample_percent: Option<u8>,
 }
 
 /// Counters collected during an integrity scan.
@@ -739,7 +891,29 @@ fn integrity_scan(
     }
 
     // Phase 1: Check each snapshot in manifest
-    let snapshot_entries = repo.manifest().snapshots.clone();
+    let all_snapshot_entries = repo.manifest().snapshots.clone();
+    let snapshot_entries: Vec<_> = if let Some(pct) = opts.snapshot_sample_percent {
+        let total = all_snapshot_entries.len();
+        if total == 0 || pct >= 100 {
+            all_snapshot_entries
+        } else {
+            let keep = (total as u64 * pct as u64).div_ceil(100) as usize;
+            let keep = keep.max(1).min(total);
+            let mut rng = rand::thread_rng();
+            let indices: std::collections::HashSet<usize> =
+                rand::seq::index::sample(&mut rng, total, keep)
+                    .into_iter()
+                    .collect();
+            all_snapshot_entries
+                .into_iter()
+                .enumerate()
+                .filter(|(i, _)| indices.contains(i))
+                .map(|(_, e)| e)
+                .collect()
+        }
+    } else {
+        all_snapshot_entries
+    };
     let snapshot_count = snapshot_entries.len();
     for (i, entry) in snapshot_entries.iter().enumerate() {
         emit_progress(
@@ -848,7 +1022,6 @@ fn integrity_scan(
     }
 
     // Phase 2: Pack existence check
-    counters.chunks_existence_checked = repo.chunk_index().len();
     let mut pack_chunks: HashMap<PackId, Vec<(ChunkId, ChunkIndexEntry)>> = HashMap::new();
     for (chunk_id, entry) in repo.chunk_index().iter() {
         if let Some(skip) = opts.skip_packs {
@@ -861,7 +1034,6 @@ fn integrity_scan(
             .or_default()
             .push((*chunk_id, *entry));
     }
-
     let packs_for_existence: Vec<(PackId, usize)> = pack_chunks
         .iter()
         .map(|(pack_id, chunks)| (*pack_id, chunks.len()))
@@ -878,6 +1050,22 @@ fn integrity_scan(
         let (existence_checked, pack_issues) =
             parallel_pack_existence(&repo.storage, &packs_for_existence, concurrency);
         counters.packs_existence_checked = existence_checked;
+
+        // Count chunks only in packs whose existence was definitively resolved
+        // (Ok(true) or Ok(false)). Packs with I/O errors are not counted.
+        let io_failed_packs: HashSet<PackId> = pack_issues
+            .iter()
+            .filter_map(|issue| match issue {
+                IntegrityIssue::PackExistenceCheckFailed { pack_id, .. } => Some(*pack_id),
+                _ => None,
+            })
+            .collect();
+        counters.chunks_existence_checked = pack_chunks
+            .iter()
+            .filter(|(pid, _)| !io_failed_packs.contains(pid))
+            .map(|(_, chunks)| chunks.len())
+            .sum();
+
         issues.extend(pack_issues);
 
         emit_progress(
@@ -1430,6 +1618,7 @@ pub fn run_with_repair(
         detect_orphans: true,
         verify_data,
         skip_packs: None,
+        snapshot_sample_percent: None,
     };
 
     if mode == RepairMode::PlanOnly {
@@ -1458,6 +1647,7 @@ pub fn run_with_repair(
             packs_existence_checked: scan.counters.packs_existence_checked,
             chunks_data_verified: scan.counters.chunks_data_verified,
             errors: scan.issues.iter().map(|i| i.to_check_error()).collect(),
+            skipped: false,
         };
 
         Ok(RepairResult {
@@ -1504,6 +1694,7 @@ pub fn run_with_repair(
                 packs_existence_checked: scan.counters.packs_existence_checked,
                 chunks_data_verified: scan.counters.chunks_data_verified,
                 errors: scan.issues.iter().map(|i| i.to_check_error()).collect(),
+                skipped: false,
             };
 
             Ok(RepairResult {
