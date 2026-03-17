@@ -57,7 +57,7 @@ pub(crate) enum ProcessedEntry {
         item: Item,
         abs_path: String,
         metadata: fs::MetadataSummary,
-        cached_refs: Vec<ChunkRef>,
+        cached_refs: Arc<Vec<ChunkRef>>,
     },
     /// Non-file item (directory, symlink, zero-size file).
     NonFile {
@@ -445,7 +445,7 @@ fn consume_processed_entry(
                 metadata.mtime_ns,
                 metadata.ctime_ns,
                 metadata.size,
-                std::mem::take(&mut item.chunks),
+                Arc::new(std::mem::take(&mut item.chunks)),
             );
 
             emit_stats_progress(progress, stats, Some(std::mem::take(&mut item.path)));
@@ -545,7 +545,7 @@ fn consume_processed_entry(
                     accum.metadata.mtime_ns,
                     accum.metadata.ctime_ns,
                     accum.metadata.size,
-                    std::mem::take(&mut accum.item.chunks),
+                    Arc::new(std::mem::take(&mut accum.item.chunks)),
                 );
 
                 emit_stats_progress(progress, stats, Some(std::mem::take(&mut accum.item.path)));
@@ -564,7 +564,7 @@ fn consume_processed_entry(
                 });
             }
 
-            super::commit::commit_cache_hit(repo, &mut item, cached_refs, stats)?;
+            super::commit::commit_cache_hit(repo, &mut item, &cached_refs, stats)?;
 
             if verbose {
                 super::emit_progress(
@@ -593,7 +593,7 @@ fn consume_processed_entry(
                 metadata.mtime_ns,
                 metadata.ctime_ns,
                 metadata.size,
-                std::mem::take(&mut item.chunks),
+                cached_refs,
             );
 
             debug!(path = %item.path, "file cache hit (parallel)");

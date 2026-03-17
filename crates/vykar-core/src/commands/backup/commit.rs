@@ -95,12 +95,12 @@ pub(super) fn process_worker_chunks(
 pub(super) fn commit_cache_hit(
     repo: &mut Repository,
     item: &mut Item,
-    cached_refs: Vec<ChunkRef>,
+    cached_refs: &[ChunkRef],
     stats: &mut SnapshotStats,
 ) -> Result<()> {
     let mut file_original: u64 = 0;
     let mut file_compressed: u64 = 0;
-    for cr in &cached_refs {
+    for cr in cached_refs {
         let stored_size = repo.reuse_cached_chunk_ref(&cr.id)?;
         file_original += cr.size as u64;
         file_compressed += stored_size as u64;
@@ -108,6 +108,6 @@ pub(super) fn commit_cache_hit(
     stats.nfiles += 1;
     stats.original_size += file_original;
     stats.compressed_size += file_compressed;
-    item.chunks = cached_refs;
+    item.chunks = cached_refs.to_vec();
     Ok(())
 }

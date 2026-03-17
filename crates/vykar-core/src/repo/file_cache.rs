@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use blake2::digest::{Update, VariableOutput};
 use blake2::Blake2bVar;
@@ -95,6 +96,26 @@ fn hash_path(path: &str) -> PathHash {
     PathHash(out)
 }
 
+/// Serde helper: serialize `Arc<Vec<ChunkRef>>` as a plain sequence (wire-format
+/// unchanged), deserialize via Vec then wrap in Arc.
+mod arc_vec_chunk_refs {
+    use super::*;
+    use serde::{Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(
+        v: &Arc<Vec<ChunkRef>>,
+        s: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        v.as_slice().serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        d: D,
+    ) -> std::result::Result<Arc<Vec<ChunkRef>>, D::Error> {
+        Vec::<ChunkRef>::deserialize(d).map(Arc::new)
+    }
+}
+
 /// Cached filesystem metadata for a file, used to skip re-reading unchanged files.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileCacheEntry {
@@ -103,7 +124,8 @@ pub struct FileCacheEntry {
     pub mtime_ns: i64,
     pub ctime_ns: i64,
     pub size: u64,
-    pub chunk_refs: Vec<ChunkRef>,
+    #[serde(with = "arc_vec_chunk_refs")]
+    pub chunk_refs: Arc<Vec<ChunkRef>>,
 }
 
 /// A per-source section of the file cache, keyed by source paths.
@@ -202,7 +224,7 @@ impl FileCache {
         mtime_ns: i64,
         ctime_ns: i64,
         size: u64,
-    ) -> Option<&Vec<ChunkRef>> {
+    ) -> Option<Arc<Vec<ChunkRef>>> {
         let key = self.find_section_key(path)?;
         let section = self.sections.get(key)?;
         let key = hash_path(path);
@@ -213,7 +235,7 @@ impl FileCache {
             && entry.ctime_ns == ctime_ns
             && entry.size == size
         {
-            Some(&entry.chunk_refs)
+            Some(Arc::clone(&entry.chunk_refs))
         } else {
             None
         }
@@ -234,7 +256,7 @@ impl FileCache {
         mtime_ns: i64,
         ctime_ns: i64,
         size: u64,
-        chunk_refs: Vec<ChunkRef>,
+        chunk_refs: Arc<Vec<ChunkRef>>,
     ) {
         let p = Path::new(path);
         let path_hash = hash_path(path);
@@ -499,7 +521,7 @@ struct ParentEntry {
     mtime_ns: i64,
     ctime_ns: i64,
     size: u64,
-    chunk_refs: Vec<ChunkRef>,
+    chunk_refs: Arc<Vec<ChunkRef>>,
 }
 
 /// Incremental builder for `ParentReuseIndex`.
@@ -559,7 +581,7 @@ impl ParentReuseBuilder {
                 mtime_ns: item.mtime,
                 ctime_ns,
                 size: item.size,
-                chunk_refs: item.chunks,
+                chunk_refs: Arc::new(item.chunks),
             },
         );
         true
@@ -587,10 +609,10 @@ impl ParentReuseIndex {
         size: u64,
         mtime_ns: i64,
         ctime_ns: i64,
-    ) -> Option<&[ChunkRef]> {
+    ) -> Option<Arc<Vec<ChunkRef>>> {
         let entry = self.entries.get(&hash_path(abs_path))?;
         if entry.size == size && entry.mtime_ns == mtime_ns && entry.ctime_ns == ctime_ns {
-            Some(&entry.chunk_refs)
+            Some(Arc::clone(&entry.chunk_refs))
         } else {
             None
         }
@@ -639,7 +661,16 @@ mod tests {
     use super::*;
     use vykar_types::chunk_id::ChunkId;
 
-    fn sample_chunk_refs() -> Vec<ChunkRef> {
+    fn sample_chunk_refs() -> Arc<Vec<ChunkRef>> {
+        Arc::new(vec![ChunkRef {
+            id: ChunkId([0xAA; 32]),
+            size: 1024,
+            csize: 512,
+        }])
+    }
+
+    /// Raw Vec variant for constructing `Item` structs in tests.
+    fn sample_chunk_refs_vec() -> Vec<ChunkRef> {
         vec![ChunkRef {
             id: ChunkId([0xAA; 32]),
             size: 1024,
@@ -824,7 +855,7 @@ mod tests {
             9999999999,
             9999999999,
             8192,
-            vec![],
+            Arc::new(vec![]),
         );
 
         assert_eq!(cache.len(), 1);
@@ -1144,7 +1175,7 @@ mod tests {
                 atime: None,
                 ctime: Some(2000),
                 size: 4096,
-                chunks: sample_chunk_refs(),
+                chunks: sample_chunk_refs_vec(),
                 link_target: None,
                 xattrs: None,
             },
@@ -1192,7 +1223,7 @@ mod tests {
             atime: None,
             ctime: None, // No ctime — legacy
             size: 4096,
-            chunks: sample_chunk_refs(),
+            chunks: sample_chunk_refs_vec(),
             link_target: None,
             xattrs: None,
         }];
@@ -1216,7 +1247,7 @@ mod tests {
                 atime: None,
                 ctime: None, // Dumps have no ctime — should not trip legacy gate
                 size: 4096,
-                chunks: sample_chunk_refs(),
+                chunks: sample_chunk_refs_vec(),
                 link_target: None,
                 xattrs: None,
             },
@@ -1232,7 +1263,7 @@ mod tests {
                 atime: None,
                 ctime: Some(3000),
                 size: 8192,
-                chunks: sample_chunk_refs(),
+                chunks: sample_chunk_refs_vec(),
                 link_target: None,
                 xattrs: None,
             },
@@ -1261,7 +1292,7 @@ mod tests {
             atime: None,
             ctime: Some(2000),
             size: 4096,
-            chunks: sample_chunk_refs(),
+            chunks: sample_chunk_refs_vec(),
             link_target: None,
             xattrs: None,
         }];
@@ -1378,19 +1409,19 @@ mod tests {
         let mut cache = FileCache::new();
         cache.begin_sections(&roots(&["/data", "/data/sub"]));
 
-        let refs_a = vec![ChunkRef {
+        let refs_a = Arc::new(vec![ChunkRef {
             id: ChunkId([0xAA; 32]),
             size: 100,
             csize: 50,
-        }];
-        let refs_b = vec![ChunkRef {
+        }]);
+        let refs_b = Arc::new(vec![ChunkRef {
             id: ChunkId([0xBB; 32]),
             size: 200,
             csize: 100,
-        }];
+        }]);
 
-        cache.insert("/data/sub/foo.txt", 1, 1, 1, 1, 100, refs_a.clone());
-        cache.insert("/data/other.txt", 1, 2, 2, 2, 200, refs_b.clone());
+        cache.insert("/data/sub/foo.txt", 1, 1, 1, 1, 100, Arc::clone(&refs_a));
+        cache.insert("/data/other.txt", 1, 2, 2, 2, 200, Arc::clone(&refs_b));
 
         // Lookup routes to longest-prefix section.
         let hit = cache.lookup("/data/sub/foo.txt", 1, 1, 1, 1, 100).unwrap();

@@ -229,7 +229,7 @@ pub(super) enum WalkEntry {
         item: Item,
         abs_path: String,
         metadata: fs::MetadataSummary,
-        cached_refs: Vec<ChunkRef>,
+        cached_refs: Arc<Vec<ChunkRef>>,
     },
     NonFile {
         item: Item,
@@ -591,7 +591,6 @@ fn walked_entry_to_walk_items(
                 metadata_summary.ctime_ns,
                 metadata_summary.size,
             )
-            .map(Vec::as_slice)
             .or_else(|| {
                 parent_reuse_index.and_then(|idx| {
                     idx.lookup(
@@ -607,7 +606,7 @@ fn walked_entry_to_walk_items(
                 item,
                 abs_path,
                 metadata: metadata_summary,
-                cached_refs: cached_refs.to_vec(),
+                cached_refs,
             })));
         }
 
@@ -823,7 +822,6 @@ fn walk_source_ignore<'a>(
                         metadata_summary.ctime_ns,
                         metadata_summary.size,
                     )
-                    .map(Vec::as_slice)
                     .or_else(|| {
                         parent_reuse_index.and_then(|idx| {
                             idx.lookup(
@@ -839,7 +837,7 @@ fn walk_source_ignore<'a>(
                         item,
                         abs_path,
                         metadata: metadata_summary,
-                        cached_refs: cached_refs.to_vec(),
+                        cached_refs,
                     })));
                 }
 

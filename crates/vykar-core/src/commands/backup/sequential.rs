@@ -1,6 +1,7 @@
 use std::fs::{File, FileType};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 
 use rayon::prelude::*;
 use tracing::{debug, warn};
@@ -212,7 +213,7 @@ fn flush_cross_file_batch(
             file.metadata_summary.mtime_ns,
             file.metadata_summary.ctime_ns,
             file.metadata_summary.size,
-            std::mem::take(&mut item.chunks),
+            Arc::new(std::mem::take(&mut item.chunks)),
         );
 
         emit_stats_progress(progress, stats, Some(std::mem::take(&mut item.path)));
@@ -279,7 +280,6 @@ pub(super) fn process_regular_file_item(
             metadata_summary.ctime_ns,
             file_size,
         )
-        .map(Vec::as_slice)
         .or_else(|| {
             parent_reuse_index.and_then(|idx| {
                 idx.lookup(
@@ -292,8 +292,7 @@ pub(super) fn process_regular_file_item(
         });
 
     if let Some(cached_refs) = effective_hit {
-        let cached_refs = cached_refs.to_vec();
-        super::commit::commit_cache_hit(repo, item, cached_refs, stats)?;
+        super::commit::commit_cache_hit(repo, item, &cached_refs, stats)?;
 
         if verbose {
             emit_progress(
@@ -313,7 +312,7 @@ pub(super) fn process_regular_file_item(
             metadata_summary.mtime_ns,
             metadata_summary.ctime_ns,
             file_size,
-            item.chunks.clone(),
+            cached_refs,
         );
 
         debug!(path = %item.path, "file cache hit");
@@ -408,7 +407,7 @@ pub(super) fn process_regular_file_item(
         metadata_summary.mtime_ns,
         metadata_summary.ctime_ns,
         file_size,
-        item.chunks.clone(),
+        Arc::new(item.chunks.clone()),
     );
 
     emit_stats_progress(progress, stats, Some(item.path.clone()));
@@ -689,7 +688,6 @@ pub(super) fn process_source_path(
                         metadata_summary.ctime_ns,
                         metadata_summary.size,
                     )
-                    .map(Vec::as_slice)
                     .or_else(|| {
                         parent_reuse_index.and_then(|idx| {
                             idx.lookup(
@@ -702,7 +700,6 @@ pub(super) fn process_source_path(
                     });
 
                 if let Some(cached_refs) = effective_hit {
-                    let cached_refs = cached_refs.to_vec();
                     // Flush batch to preserve walk order before the cache-hit item.
                     flush_cross_file_batch(
                         &mut cross_batch,
@@ -726,7 +723,7 @@ pub(super) fn process_source_path(
                         });
                     }
 
-                    super::commit::commit_cache_hit(repo, &mut item, cached_refs, stats)?;
+                    super::commit::commit_cache_hit(repo, &mut item, &cached_refs, stats)?;
 
                     if verbose {
                         emit_progress(
@@ -746,7 +743,7 @@ pub(super) fn process_source_path(
                         metadata_summary.mtime_ns,
                         metadata_summary.ctime_ns,
                         metadata_summary.size,
-                        item.chunks.clone(),
+                        cached_refs,
                     );
 
                     debug!(path = %item.path, "file cache hit (sequential small)");
