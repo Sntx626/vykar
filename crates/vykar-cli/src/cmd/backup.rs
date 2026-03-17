@@ -91,21 +91,29 @@ pub(crate) fn run_backup(
         // Delegate to core's hook-aware backup
         let mut renderer = show_progress.then(|| BackupProgressRenderer::new(verbose, is_tty));
 
+        let mut callback = |evt: BackupRunEvent| match evt {
+            BackupRunEvent::Backup(bpe) => {
+                if let Some(ref mut r) = renderer {
+                    r.on_event(bpe);
+                }
+            }
+            // HookWarning: no action — tracing::warn! already fired
+            BackupRunEvent::HookWarning { .. } => {}
+        };
+
+        let progress: Option<&mut dyn FnMut(BackupRunEvent)> = if show_progress {
+            Some(&mut callback)
+        } else {
+            None
+        };
+
         let result = operations::run_backup_selection(
             &repo,
             &sources,
             passphrase,
             shutdown,
             verbose >= 1,
-            Some(&mut |evt| match evt {
-                BackupRunEvent::Backup(bpe) => {
-                    if let Some(ref mut r) = renderer {
-                        r.on_event(bpe);
-                    }
-                }
-                // HookWarning: no action — tracing::warn! already fired
-                BackupRunEvent::HookWarning { .. } => {}
-            }),
+            progress,
         );
 
         if let Some(ref mut r) = renderer {

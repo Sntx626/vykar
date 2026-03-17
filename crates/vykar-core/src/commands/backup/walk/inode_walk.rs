@@ -117,6 +117,9 @@ pub(in crate::commands::backup) struct InodeSortedWalk {
     /// at which the matcher was pushed. When the stack shrinks below that
     /// depth, we pop the matcher.
     gitignore_stack: Vec<(usize, Gitignore)>,
+    /// Cached result of `inode_sort_beneficial()` for the source root.
+    /// Avoids per-directory `statfs()` + `CString` allocation.
+    inode_sort_for_source: bool,
 }
 
 impl InodeSortedWalk {
@@ -158,8 +161,10 @@ impl InodeSortedWalk {
             }
         });
 
+        let inode_sort_for_source = inode_sort_beneficial(&abs_source);
+
         tracing::debug!(
-            inode_sort = inode_sort_beneficial(&abs_source),
+            inode_sort = inode_sort_for_source,
             path = %abs_source.display(),
             "source filesystem detection"
         );
@@ -213,6 +218,7 @@ impl InodeSortedWalk {
             markers,
             gitignore_enabled: git_ignore,
             gitignore_stack,
+            inode_sort_for_source,
         };
 
         // Build the root DirLevel for the source directory.
@@ -331,7 +337,7 @@ impl InodeSortedWalk {
         });
 
         // Phase 3: Sort entries for sequential disk access.
-        if inode_sort_beneficial(dir) {
+        if self.inode_sort_for_source {
             // ext4/xfs/reiserfs: inode order ≈ disk order → sequential stat.
             raw_entries.sort_unstable_by_key(|e| e.ino);
         } else {

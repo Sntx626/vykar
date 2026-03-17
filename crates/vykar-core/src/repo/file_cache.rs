@@ -225,6 +225,9 @@ impl FileCache {
         ctime_ns: i64,
         size: u64,
     ) -> Option<Arc<Vec<ChunkRef>>> {
+        if self.active_keys.is_empty() {
+            return None;
+        }
         let key = self.find_section_key(path)?;
         let section = self.sections.get(key)?;
         let key = hash_path(path);
