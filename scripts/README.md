@@ -14,6 +14,7 @@ uv run --project scripts/testbench scenario scripts/scenarios/5xchurn.yaml --bac
 ### `benchmark` — comparative benchmark harness
 
 Compares `vykar` with `restic`, `rustic`, `borg`, and `kopia`.
+Local test/benchmark repositories are always created under `/mnt/repos` so the source corpus and repository stay on separate SSDs.
 
 ```bash
 uv run --project scripts/testbench benchmark --runs 3

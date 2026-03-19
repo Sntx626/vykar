@@ -9,3 +9,4 @@ docs/src/https*
 proptest-regressions/
 fuzz/artifacts/
 fuzz/target/
+/output

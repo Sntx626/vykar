@@ -1,10 +1,31 @@
 import unittest
 from unittest import mock
+from pathlib import Path
 
 from vykar_testbench import config
 
 
 class ConfigTests(unittest.TestCase):
+    def test_resolve_local_repo_root_defaults_to_mnt_repos(self) -> None:
+        with mock.patch.dict("os.environ", {}, clear=True):
+            self.assertEqual(config.resolve_local_repo_root(), Path("/mnt/repos"))
+
+    def test_resolve_local_repo_root_sanitizes_out_of_tree_override(self) -> None:
+        with mock.patch.dict("os.environ", {"REPO_ROOT": "/tmp/bench-root"}, clear=True):
+            self.assertEqual(config.resolve_local_repo_root(), Path("/mnt/repos/bench-root"))
+
+    def test_resolve_repo_url_local_defaults_under_mnt_repos(self) -> None:
+        with mock.patch.dict("os.environ", {}, clear=True):
+            self.assertEqual(config.resolve_repo_url("local", "scenario-simple"), "/mnt/repos/scenario-repo")
+
+    def test_resolve_repo_url_local_sanitizes_repo_url_override(self) -> None:
+        with mock.patch.dict("os.environ", {"REPO_URL": "/tmp/custom-repo"}, clear=True):
+            self.assertEqual(config.resolve_repo_url("local", "scenario-simple"), "/mnt/repos/custom-repo")
+
+    def test_resolve_repo_url_local_preserves_in_tree_override(self) -> None:
+        with mock.patch.dict("os.environ", {"REPO_URL": "/mnt/repos/custom/repo"}, clear=True):
+            self.assertEqual(config.resolve_repo_url("local", "scenario-simple"), "/mnt/repos/custom/repo")
+
     def test_ensure_backend_ready_skips_non_s3(self) -> None:
         with mock.patch.dict("sys.modules", {}):
             config.ensure_backend_ready("local", "/mnt/repos/scenario-repo")

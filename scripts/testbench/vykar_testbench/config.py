@@ -10,9 +10,13 @@ import os
 import subprocess
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from urllib.parse import urlparse
 
 import yaml
+
+
+LOCAL_REPO_ROOT = Path("/mnt/repos")
 
 
 @dataclass(frozen=True)
@@ -52,7 +56,7 @@ class Defaults:
 def load_defaults() -> Defaults:
     """Load defaults from environment variables with hardcoded fallbacks."""
     return Defaults(
-        repo_root=os.environ.get("REPO_ROOT", "/mnt/repos"),
+        repo_root=str(resolve_local_repo_root()),
         corpus_local=os.environ.get("CORPUS_LOCAL", os.path.expanduser("~/corpus-local")),
         corpus_remote=os.environ.get("CORPUS_REMOTE", os.path.expanduser("~/corpus-remote")),
         runtime_root=os.environ.get("RUNTIME_ROOT", os.path.expanduser("~/runtime")),
@@ -85,13 +89,48 @@ def load_defaults() -> Defaults:
     )
 
 
+def _normalize_local_repo_root(raw_value: str | None) -> Path:
+    if not raw_value:
+        return LOCAL_REPO_ROOT
+    candidate = Path(raw_value).expanduser()
+    if not candidate.is_absolute():
+        return LOCAL_REPO_ROOT / candidate
+    if candidate == LOCAL_REPO_ROOT:
+        return LOCAL_REPO_ROOT
+    if LOCAL_REPO_ROOT in candidate.parents:
+        return candidate
+    return LOCAL_REPO_ROOT / candidate.name
+
+
+def resolve_local_repo_root() -> Path:
+    """Return the root under which local benchmark/test repos must live."""
+    return _normalize_local_repo_root(os.environ.get("REPO_ROOT"))
+
+
+def resolve_local_repo_path(default_name: str, env_var: str | None = None) -> str:
+    """Return a local repository path constrained under /mnt/repos."""
+    raw_value = os.environ.get(env_var) if env_var else None
+    base = resolve_local_repo_root()
+    if not raw_value:
+        return str(base / default_name)
+
+    candidate = Path(raw_value).expanduser()
+    if not candidate.is_absolute():
+        return str(base / candidate)
+    if candidate == LOCAL_REPO_ROOT:
+        return str(base / default_name)
+    if LOCAL_REPO_ROOT in candidate.parents:
+        return str(candidate)
+    return str(base / candidate.name)
+
+
 def resolve_repo_url(backend: str, repo_label: str, defaults: Defaults | None = None) -> str:
     """Compute the repository URL for the given backend."""
     if defaults is None:
         defaults = load_defaults()
 
     if backend == "local":
-        return os.environ.get("REPO_URL", "/mnt/repos/scenario-repo")
+        return resolve_local_repo_path("scenario-repo", "REPO_URL")
     elif backend == "rest":
         return defaults.rest_url
     elif backend == "s3":

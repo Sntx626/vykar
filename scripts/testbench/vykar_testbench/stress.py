@@ -134,7 +134,7 @@ def main() -> None:
         os.path.join(defaults.runtime_root, "stress", args.backend),
     )
     work_dir = os.path.join(stress_root, "work")
-    repo_dir = os.path.join(work_dir, "repository")
+    repo_dir = cfg.resolve_local_repo_path(f"{repo_label}-repo", "REPO_URL")
     restore_dir = os.path.join(work_dir, "restore")
     runtime_dir = os.path.join(work_dir, "runtime")
     config_path = os.path.join(work_dir, "vykar.stress.yaml")
@@ -178,13 +178,13 @@ def main() -> None:
     if args.backend == "local":
         os.makedirs(repo_dir, exist_ok=True)
 
-    # Resolve repo URL — honor REPO_URL for any backend; default local to
-    # the ephemeral work/repository dir (not the shared scenario repo).
+    # Resolve repo URL. Local backends are always kept under /mnt/repos so
+    # the source corpus and repository stay on separate drives.
     env_repo_url = os.environ.get("REPO_URL")
-    if env_repo_url:
-        repo_url = env_repo_url
-    elif args.backend == "local":
+    if args.backend == "local":
         repo_url = repo_dir
+    elif env_repo_url:
+        repo_url = env_repo_url
     else:
         repo_url = cfg.resolve_repo_url(args.backend, repo_label, defaults)
 

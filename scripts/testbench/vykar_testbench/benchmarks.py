@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import bench_report as report
+from . import config as cfg
 from .vykar import drop_caches as _drop_caches_shared
 
 
@@ -120,7 +121,7 @@ def build_config(*, runs: int, tool: str | None, dataset: str | None) -> Benchma
     selected_tools = resolve_selected_tools(tool)
     ensure_required_commands(selected_tools)
 
-    repo_root = Path(os.environ.get("REPO_ROOT", "/mnt/repos")).expanduser().resolve()
+    repo_root = cfg.resolve_local_repo_root()
     runtime_root = Path(os.environ.get("RUNTIME_ROOT", str(Path.home() / "runtime"))).expanduser().resolve()
     passphrase = os.environ.get("PASSPHRASE", "123")
     user = os.environ.get("USER", "unknown")

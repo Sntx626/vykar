@@ -151,6 +151,22 @@ class ScenarioRunnerTests(unittest.TestCase):
 
 
 class BenchmarkRunnerTests(unittest.TestCase):
+    def test_build_config_keeps_local_benchmark_repos_under_mnt_repos(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime_root = Path(tmpdir) / "runtime"
+            dataset = Path(tmpdir) / "dataset"
+            (dataset / "snapshot-1").mkdir(parents=True)
+            (dataset / "snapshot-2").mkdir(parents=True)
+            with mock.patch.dict("os.environ", {"RUNTIME_ROOT": str(runtime_root), "REPO_ROOT": "/tmp/custom-root"}):
+                with mock.patch("vykar_testbench.benchmarks.ensure_required_commands"):
+                    cfg = benchmarks.build_config(runs=1, tool="vykar", dataset=str(dataset))
+
+        self.assertEqual(cfg.repo_root, Path("/mnt/repos/custom-root"))
+        self.assertEqual(cfg.vykar_repo, Path("/mnt/repos/custom-root/bench-vykar"))
+        self.assertEqual(cfg.restic_repo, Path("/mnt/repos/custom-root/bench-restic"))
+        self.assertEqual(cfg.rustic_repo, Path("/mnt/repos/custom-root/bench-rustic"))
+        self.assertEqual(cfg.borg_repo, Path("/mnt/repos/custom-root/bench-borg"))
+
     def test_previous_run_roots_are_sorted_newest_first(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             runtime_root = Path(tmpdir)
