@@ -473,3 +473,831 @@ impl S3Backend {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::RetryConfig;
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+    use std::sync::{Arc, Mutex};
+
+    // ── Helpers ──────────────────────────────────────────────────────
+
+    /// Single-response TCP mock server.
+    fn mock_server(response: &str) -> (u16, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let response = response.to_string();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            loop {
+                line.clear();
+                reader.read_line(&mut line).unwrap();
+                if line.trim().is_empty() {
+                    break;
+                }
+            }
+            stream.write_all(response.as_bytes()).unwrap();
+            stream.flush().unwrap();
+        });
+        (port, handle)
+    }
+
+    /// Multi-response TCP mock server.
+    fn mock_server_multi(responses: Vec<String>) -> (u16, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = std::thread::spawn(move || {
+            for response in &responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                loop {
+                    line.clear();
+                    reader.read_line(&mut line).unwrap();
+                    if line.trim().is_empty() {
+                        break;
+                    }
+                }
+                stream.write_all(response.as_bytes()).unwrap();
+                stream.flush().unwrap();
+                drop(stream);
+            }
+        });
+        (port, handle)
+    }
+
+    /// Single-response mock that captures the full request (request line + headers).
+    fn mock_server_capture(
+        response: &str,
+    ) -> (u16, Arc<Mutex<Vec<String>>>, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let response = response.to_string();
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let captured_clone = Arc::clone(&captured);
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut lines = Vec::new();
+            let mut line = String::new();
+            loop {
+                line.clear();
+                reader.read_line(&mut line).unwrap();
+                if line.trim().is_empty() {
+                    break;
+                }
+                lines.push(line.trim().to_string());
+            }
+            *captured_clone.lock().unwrap() = lines;
+            stream.write_all(response.as_bytes()).unwrap();
+            stream.flush().unwrap();
+        });
+        (port, captured, handle)
+    }
+
+    /// Multi-response mock that captures all requests.
+    #[allow(clippy::type_complexity)]
+    fn mock_server_capture_multi(
+        responses: Vec<String>,
+    ) -> (
+        u16,
+        Arc<Mutex<Vec<Vec<String>>>>,
+        std::thread::JoinHandle<()>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let captured_clone = Arc::clone(&captured);
+        let handle = std::thread::spawn(move || {
+            for response in &responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut lines = Vec::new();
+                let mut line = String::new();
+                loop {
+                    line.clear();
+                    reader.read_line(&mut line).unwrap();
+                    if line.trim().is_empty() {
+                        break;
+                    }
+                    lines.push(line.trim().to_string());
+                }
+                captured_clone.lock().unwrap().push(lines);
+                stream.write_all(response.as_bytes()).unwrap();
+                stream.flush().unwrap();
+                drop(stream);
+            }
+        });
+        (port, captured, handle)
+    }
+
+    fn no_retry() -> RetryConfig {
+        RetryConfig {
+            max_retries: 0,
+            ..Default::default()
+        }
+    }
+
+    fn fast_retry() -> RetryConfig {
+        RetryConfig {
+            max_retries: 2,
+            retry_delay_ms: 1,
+            retry_max_delay_ms: 1,
+        }
+    }
+
+    fn s3_backend(port: u16, retry: RetryConfig, soft_delete: bool) -> S3Backend {
+        S3Backend::new(
+            "test-bucket",
+            "us-east-1",
+            "",
+            &format!("http://127.0.0.1:{port}"),
+            "AKID",
+            "SECRET",
+            retry,
+            soft_delete,
+        )
+        .unwrap()
+    }
+
+    fn s3_backend_rooted(port: u16, retry: RetryConfig, soft_delete: bool) -> S3Backend {
+        S3Backend::new(
+            "test-bucket",
+            "us-east-1",
+            "backups/vykar",
+            &format!("http://127.0.0.1:{port}"),
+            "AKID",
+            "SECRET",
+            retry,
+            soft_delete,
+        )
+        .unwrap()
+    }
+
+    /// Generate ListBucketResult XML for rusty_s3 parser.
+    fn list_xml(keys: &[(&str, u64)], next_token: Option<&str>) -> String {
+        let mut xml = String::from(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Name>test-bucket</Name>
+  <Prefix></Prefix>
+  <KeyCount>"#,
+        );
+        xml.push_str(&keys.len().to_string());
+        xml.push_str("</KeyCount>\n  <MaxKeys>1000</MaxKeys>\n  <IsTruncated>");
+        xml.push_str(if next_token.is_some() {
+            "true"
+        } else {
+            "false"
+        });
+        xml.push_str("</IsTruncated>\n");
+        for (key, size) in keys {
+            xml.push_str(&format!(
+                "  <Contents>\n    <Key>{key}</Key>\n    \
+                 <LastModified>2024-01-01T00:00:00.000Z</LastModified>\n    \
+                 <ETag>\"abc\"</ETag>\n    \
+                 <Size>{size}</Size>\n    \
+                 <StorageClass>STANDARD</StorageClass>\n  </Contents>\n"
+            ));
+        }
+        if let Some(token) = next_token {
+            xml.push_str(&format!(
+                "  <NextContinuationToken>{token}</NextContinuationToken>\n"
+            ));
+        }
+        xml.push_str("  <EncodingType>url</EncodingType>\n</ListBucketResult>");
+        xml
+    }
+
+    fn s3_error_xml(code: &str, message: &str) -> String {
+        format!("<Error><Code>{code}</Code><Message>{message}</Message></Error>")
+    }
+
+    // ── 1. s3_check_status via GET ──────────────────────────────────
+
+    #[test]
+    fn get_200_succeeds() {
+        let body = "hello";
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let (port, handle) = mock_server(&resp);
+        let backend = s3_backend(port, no_retry(), false);
+        let result = backend.get("testkey").unwrap();
+        assert_eq!(result, Some(b"hello".to_vec()));
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn get_404_returns_none() {
+        let resp = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        let (port, handle) = mock_server(resp);
+        let backend = s3_backend(port, no_retry(), false);
+        let result = backend.get("testkey").unwrap();
+        assert_eq!(result, None);
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn get_429_retries_then_succeeds() {
+        let body = "data";
+        let responses = vec![
+            "HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                .to_string(),
+            "HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                .to_string(),
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            ),
+        ];
+        let (port, handle) = mock_server_multi(responses);
+        let backend = s3_backend(port, fast_retry(), false);
+        let result = backend.get("testkey").unwrap();
+        assert_eq!(result, Some(b"data".to_vec()));
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn get_500_retries_then_succeeds() {
+        let body = "ok";
+        let responses = vec![
+            "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                .to_string(),
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            ),
+        ];
+        let (port, handle) = mock_server_multi(responses);
+        let backend = s3_backend(port, fast_retry(), false);
+        let result = backend.get("testkey").unwrap();
+        assert_eq!(result, Some(b"ok".to_vec()));
+        handle.join().unwrap();
+    }
+
+    // ── 2. XML error body diagnostics ───────────────────────────────
+
+    #[test]
+    fn get_error_body_preserved() {
+        let xml = s3_error_xml("AccessDenied", "Access Denied");
+        let resp = format!(
+            "HTTP/1.1 403 Forbidden\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{xml}",
+            xml.len()
+        );
+        let (port, handle) = mock_server(&resp);
+        let backend = s3_backend(port, no_retry(), false);
+        let err = backend.get("testkey").unwrap_err().to_string();
+        assert!(err.contains("AccessDenied"), "got: {err}");
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn get_error_body_truncated() {
+        let big_body = "X".repeat(2000);
+        let resp = format!(
+            "HTTP/1.1 403 Forbidden\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{big_body}",
+            big_body.len()
+        );
+        let (port, handle) = mock_server(&resp);
+        let backend = s3_backend(port, no_retry(), false);
+        let err = backend.get("testkey").unwrap_err().to_string();
+        assert!(err.contains("(truncated)"), "got: {err}");
+        handle.join().unwrap();
+    }
+
+    // ── 3. GET_RANGE ────────────────────────────────────────────────
+
+    #[test]
+    fn get_range_404_returns_none() {
+        let resp = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        let (port, handle) = mock_server(resp);
+        let backend = s3_backend(port, no_retry(), false);
+        let result = backend.get_range("testkey", 0, 10).unwrap();
+        assert_eq!(result, None);
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn get_range_truncated_body_retries() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = std::thread::spawn(move || {
+            // Request 1: truncated (declare 50 bytes, send 5, close)
+            {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                loop {
+                    line.clear();
+                    reader.read_line(&mut line).unwrap();
+                    if line.trim().is_empty() {
+                        break;
+                    }
+                }
+                let headers = "HTTP/1.1 206 Partial Content\r\n\
+                               Content-Length: 50\r\nConnection: close\r\n\r\n";
+                stream.write_all(headers.as_bytes()).unwrap();
+                stream.write_all(&[0xABu8; 5]).unwrap();
+                stream.flush().unwrap();
+                drop(stream);
+            }
+            // Request 2: complete
+            {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                loop {
+                    line.clear();
+                    reader.read_line(&mut line).unwrap();
+                    if line.trim().is_empty() {
+                        break;
+                    }
+                }
+                let headers = "HTTP/1.1 206 Partial Content\r\n\
+                               Content-Length: 50\r\nConnection: close\r\n\r\n";
+                stream.write_all(headers.as_bytes()).unwrap();
+                stream.write_all(&[0xABu8; 50]).unwrap();
+                stream.flush().unwrap();
+            }
+        });
+        let backend = s3_backend(port, fast_retry(), false);
+        let result = backend.get_range("testkey", 0, 50).unwrap().unwrap();
+        assert_eq!(result.len(), 50);
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn get_range_200_is_permanent_error() {
+        let body = "full object";
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let (port, handle) = mock_server(&resp);
+        let backend = s3_backend(port, no_retry(), false);
+        let err = backend.get_range("testkey", 0, 10).unwrap_err().to_string();
+        assert!(err.contains("200 instead of 206"), "got: {err}");
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn get_range_soft_delete_tombstone_returns_none() {
+        // HEAD returns Content-Length: 0 → size() returns None → get_range short-circuits.
+        // Use capture mock to assert exactly one request (HEAD) is made — no range GET.
+        let resp = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        let (port, captured, handle) = mock_server_capture(resp);
+        let backend = s3_backend(port, no_retry(), true);
+        let result = backend.get_range("testkey", 0, 10).unwrap();
+        assert_eq!(result, None);
+        let lines = captured.lock().unwrap();
+        let request_line = &lines[0];
+        assert!(
+            request_line.starts_with("HEAD "),
+            "expected HEAD request, got: {request_line}"
+        );
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn get_range_zero_length_errors() {
+        let backend = s3_backend(1, no_retry(), false);
+        let err = backend.get_range("testkey", 0, 0).unwrap_err().to_string();
+        assert!(err.contains("zero-length read requested"), "got: {err}");
+    }
+
+    #[test]
+    fn get_range_overflow_errors() {
+        let backend = s3_backend(1, no_retry(), false);
+        let err = backend
+            .get_range("testkey", u64::MAX, 2)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("overflows u64"), "got: {err}");
+    }
+
+    // ── 4. HEAD: exists() and size() ────────────────────────────────
+
+    #[test]
+    fn exists_true_on_200() {
+        let resp = "HTTP/1.1 200 OK\r\nContent-Length: 42\r\nConnection: close\r\n\r\n";
+        let (port, handle) = mock_server(resp);
+        let backend = s3_backend(port, no_retry(), false);
+        assert!(backend.exists("testkey").unwrap());
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn exists_false_on_404() {
+        let resp = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        let (port, handle) = mock_server(resp);
+        let backend = s3_backend(port, no_retry(), false);
+        assert!(!backend.exists("testkey").unwrap());
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn exists_soft_delete_tombstone_false() {
+        let resp = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        let (port, handle) = mock_server(resp);
+        let backend = s3_backend(port, no_retry(), true);
+        assert!(!backend.exists("testkey").unwrap());
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn size_missing_content_length() {
+        let resp = "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n";
+        let (port, handle) = mock_server(resp);
+        let backend = s3_backend(port, no_retry(), false);
+        let err = backend.size("testkey").unwrap_err().to_string();
+        assert!(err.contains("missing Content-Length"), "got: {err}");
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn size_rejects_invalid_content_length() {
+        // ureq 3 rejects non-numeric Content-Length at the protocol level,
+        // so this is a smoke test that the error surfaces through size().
+        // Direct validation coverage lives in http_util::tests.
+        let resp = "HTTP/1.1 200 OK\r\nContent-Length: garbage\r\nConnection: close\r\n\r\n";
+        let (port, handle) = mock_server(resp);
+        let backend = s3_backend(port, no_retry(), false);
+        backend.size("testkey").unwrap_err();
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn size_200_returns_some() {
+        let resp = "HTTP/1.1 200 OK\r\nContent-Length: 42\r\nConnection: close\r\n\r\n";
+        let (port, handle) = mock_server(resp);
+        let backend = s3_backend(port, no_retry(), false);
+        assert_eq!(backend.size("testkey").unwrap(), Some(42));
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn size_404_returns_none() {
+        let resp = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        let (port, handle) = mock_server(resp);
+        let backend = s3_backend(port, no_retry(), false);
+        assert_eq!(backend.size("testkey").unwrap(), None);
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn size_soft_delete_zero_returns_none() {
+        let resp = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        let (port, handle) = mock_server(resp);
+        let backend = s3_backend(port, no_retry(), true);
+        let result = backend.size("testkey").unwrap();
+        assert_eq!(result, None);
+        handle.join().unwrap();
+    }
+
+    // ── 5. LIST with canned S3 XML ──────────────────────────────────
+
+    #[test]
+    fn list_single_page() {
+        let xml = list_xml(&[("snapshots/abc", 100), ("snapshots/def", 200)], None);
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{xml}",
+            xml.len()
+        );
+        let (port, handle) = mock_server(&resp);
+        let backend = s3_backend(port, no_retry(), false);
+        let keys = backend.list("snapshots/").unwrap();
+        assert_eq!(keys, vec!["snapshots/abc", "snapshots/def"]);
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn list_paginated() {
+        let xml1 = list_xml(&[("snapshots/abc", 100)], Some("tok1"));
+        let xml2 = list_xml(&[("snapshots/def", 200)], None);
+        let responses = vec![
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{xml1}",
+                xml1.len()
+            ),
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{xml2}",
+                xml2.len()
+            ),
+        ];
+        let (port, captured, handle) = mock_server_capture_multi(responses);
+        let backend = s3_backend(port, no_retry(), false);
+        let keys = backend.list("snapshots/").unwrap();
+        assert_eq!(keys, vec!["snapshots/abc", "snapshots/def"]);
+
+        let reqs = captured.lock().unwrap();
+        assert_eq!(reqs.len(), 2);
+        // Request 1: must include list-type=2, encoding-type=url, and exact prefix value
+        let req1_line = &reqs[0][0];
+        assert!(req1_line.contains("list-type=2"), "req1: {req1_line}");
+        assert!(req1_line.contains("encoding-type=url"), "req1: {req1_line}");
+        assert!(
+            req1_line.contains("prefix=snapshots%2F") || req1_line.contains("prefix=snapshots/"),
+            "expected prefix=snapshots/, req1: {req1_line}"
+        );
+        // Request 2: must include exact continuation-token value from page 1
+        let req2_line = &reqs[1][0];
+        assert!(
+            req2_line.contains("continuation-token=tok1"),
+            "expected continuation-token=tok1, req2: {req2_line}"
+        );
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn list_url_encoded_keys() {
+        let xml = list_xml(&[("snapshots%2Fabc", 100)], None);
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{xml}",
+            xml.len()
+        );
+        let (port, handle) = mock_server(&resp);
+        let backend = s3_backend(port, no_retry(), false);
+        let keys = backend.list("snapshots/").unwrap();
+        assert_eq!(keys, vec!["snapshots/abc"]);
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn list_skips_directory_markers() {
+        let xml = list_xml(&[("snapshots/", 0), ("snapshots/abc", 100)], None);
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{xml}",
+            xml.len()
+        );
+        let (port, handle) = mock_server(&resp);
+        let backend = s3_backend(port, no_retry(), false);
+        let keys = backend.list("snapshots/").unwrap();
+        assert_eq!(keys, vec!["snapshots/abc"]);
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn list_soft_delete_skips_zero_byte() {
+        let xml = list_xml(&[("snapshots/tomb", 0), ("snapshots/live", 100)], None);
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{xml}",
+            xml.len()
+        );
+        let (port, handle) = mock_server(&resp);
+        let backend = s3_backend(port, no_retry(), true);
+        let keys = backend.list("snapshots/").unwrap();
+        assert_eq!(keys, vec!["snapshots/live"]);
+        handle.join().unwrap();
+    }
+
+    // ── 6. PUT / DELETE status ──────────────────────────────────────
+
+    #[test]
+    fn put_429_retries() {
+        let responses = vec![
+            "HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                .to_string(),
+            "HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                .to_string(),
+            "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string(),
+        ];
+        let (port, handle) = mock_server_multi(responses);
+        let backend = s3_backend(port, fast_retry(), false);
+        backend.put("testkey", b"data").unwrap();
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn put_403_fails_immediately() {
+        let xml = s3_error_xml("AccessDenied", "Access Denied");
+        let resp_str = format!(
+            "HTTP/1.1 403 Forbidden\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{xml}",
+            xml.len()
+        );
+        // PUT sends a body, so the mock must drain the full request (headers +
+        // body) before replying; otherwise ureq may get a broken pipe.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            let mut content_len = 0usize;
+            loop {
+                line.clear();
+                reader.read_line(&mut line).unwrap();
+                if line.trim().is_empty() {
+                    break;
+                }
+                if let Some(val) = line.to_lowercase().strip_prefix("content-length:") {
+                    content_len = val.trim().parse().unwrap_or(0);
+                }
+            }
+            // Drain the request body
+            let mut body = vec![0u8; content_len];
+            if content_len > 0 {
+                std::io::Read::read_exact(&mut reader, &mut body).unwrap();
+            }
+            stream.write_all(resp_str.as_bytes()).unwrap();
+            stream.flush().unwrap();
+        });
+        let backend = s3_backend(port, fast_retry(), false);
+        let err = backend.put("testkey", b"data").unwrap_err().to_string();
+        assert!(err.contains("AccessDenied"), "got: {err}");
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn delete_503_retries() {
+        let responses = vec![
+            "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                .to_string(),
+            "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                .to_string(),
+            "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string(),
+        ];
+        let (port, handle) = mock_server_multi(responses);
+        let backend = s3_backend(port, fast_retry(), false);
+        backend.delete("testkey").unwrap();
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn delete_error_body_in_diagnostics() {
+        let xml = s3_error_xml("AccessDenied", "Access Denied");
+        let resp = format!(
+            "HTTP/1.1 403 Forbidden\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{xml}",
+            xml.len()
+        );
+        let (port, handle) = mock_server(&resp);
+        let backend = s3_backend(port, no_retry(), false);
+        let err = backend.delete("testkey").unwrap_err().to_string();
+        assert!(err.contains("AccessDenied"), "got: {err}");
+        handle.join().unwrap();
+    }
+
+    // ── 7. Range header signing ─────────────────────────────────────
+
+    #[test]
+    fn get_range_signs_range_header() {
+        let body = [0xABu8; 10];
+        // Build raw response bytes since body is binary
+        let header_bytes =
+            b"HTTP/1.1 206 Partial Content\r\nContent-Length: 10\r\nConnection: close\r\n\r\n";
+        let mut raw = Vec::from(&header_bytes[..]);
+        raw.extend_from_slice(&body);
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured_clone = Arc::clone(&captured);
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut lines = Vec::new();
+            let mut line = String::new();
+            loop {
+                line.clear();
+                reader.read_line(&mut line).unwrap();
+                if line.trim().is_empty() {
+                    break;
+                }
+                lines.push(line.trim().to_string());
+            }
+            *captured_clone.lock().unwrap() = lines;
+            stream.write_all(&raw).unwrap();
+            stream.flush().unwrap();
+        });
+
+        let backend = s3_backend(port, no_retry(), false);
+        let _result = backend.get_range("testkey", 0, 10).unwrap();
+
+        let lines = captured.lock().unwrap();
+        // Check wire headers contain range header
+        let has_range = lines.iter().any(|l| {
+            let lower = l.to_lowercase();
+            lower.starts_with("range:") && lower.contains("bytes=0-9")
+        });
+        assert!(has_range, "expected range header, got: {lines:?}");
+        // Check URL query string contains range in the exact SignedHeaders value.
+        // SigV4 lists signed headers semicolon-delimited, URL-encoded: host%3Brange
+        let request_line = &lines[0];
+        assert!(
+            request_line.contains("X-Amz-SignedHeaders=host%3Brange"),
+            "expected X-Amz-SignedHeaders=host%3Brange, got: {request_line}"
+        );
+        handle.join().unwrap();
+    }
+
+    // ── 8. Soft-delete behavior ─────────────────────────────────────
+
+    #[test]
+    fn get_soft_delete_zero_byte_returns_none() {
+        let resp = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        let (port, handle) = mock_server(resp);
+        let backend = s3_backend(port, no_retry(), true);
+        let result = backend.get("testkey").unwrap();
+        assert_eq!(result, None);
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn delete_soft_delete_sends_put() {
+        let resp = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        let (port, captured, handle) = mock_server_capture(resp);
+        let backend = s3_backend(port, no_retry(), true);
+        backend.delete("testkey").unwrap();
+        let lines = captured.lock().unwrap();
+        let request_line = &lines[0];
+        assert!(
+            request_line.starts_with("PUT "),
+            "expected PUT, got: {request_line}"
+        );
+        handle.join().unwrap();
+    }
+
+    // ── 9. Root prefix ──────────────────────────────────────────────
+
+    #[test]
+    fn get_with_root_sends_prefixed_path() {
+        let body = "hello";
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let (port, captured, handle) = mock_server_capture(&resp);
+        let backend = s3_backend_rooted(port, no_retry(), false);
+        let result = backend.get("testkey").unwrap();
+        assert_eq!(result, Some(b"hello".to_vec()));
+        let lines = captured.lock().unwrap();
+        let request_line = &lines[0];
+        assert!(
+            request_line.contains("/test-bucket/backups/vykar/testkey"),
+            "expected prefixed path, got: {request_line}"
+        );
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn list_with_root_strips_prefix() {
+        let xml = list_xml(
+            &[
+                ("backups/vykar/snapshots/abc", 100),
+                ("backups/vykar/snapshots/def", 200),
+            ],
+            None,
+        );
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{xml}",
+            xml.len()
+        );
+        let (port, captured, handle) = mock_server_capture(&resp);
+        let backend = s3_backend_rooted(port, no_retry(), false);
+        let keys = backend.list("snapshots/").unwrap();
+        assert_eq!(keys, vec!["snapshots/abc", "snapshots/def"]);
+        // Check that the request includes the exact prefixed prefix value
+        let lines = captured.lock().unwrap();
+        let request_line = &lines[0];
+        assert!(
+            request_line.contains("prefix=backups%2Fvykar%2Fsnapshots%2F")
+                || request_line.contains("prefix=backups/vykar/snapshots/"),
+            "expected prefix=backups/vykar/snapshots/, got: {request_line}"
+        );
+        handle.join().unwrap();
+    }
+
+    // ── 10. create_dir ──────────────────────────────────────────────
+
+    #[test]
+    fn create_dir_sends_put_with_trailing_slash_and_md5() {
+        let resp = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        let (port, captured, handle) = mock_server_capture(resp);
+        let backend = s3_backend(port, no_retry(), false);
+        backend.create_dir("data").unwrap();
+        let lines = captured.lock().unwrap();
+        // Request method is PUT
+        let request_line = &lines[0];
+        assert!(
+            request_line.starts_with("PUT "),
+            "expected PUT, got: {request_line}"
+        );
+        // Path contains trailing slash
+        assert!(
+            request_line.contains("/test-bucket/data/"),
+            "expected trailing slash, got: {request_line}"
+        );
+        // Headers contain content-md5
+        let has_md5 = lines.iter().any(|l| {
+            let lower = l.to_lowercase();
+            lower.starts_with("content-md5:") && lower.contains("1b2m2y8asgtpgamy7phcfg==")
+        });
+        assert!(has_md5, "expected content-md5 header, got: {lines:?}");
+        handle.join().unwrap();
+    }
+}
