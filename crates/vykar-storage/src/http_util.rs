@@ -1,13 +1,13 @@
 use vykar_types::error::{Result, VykarError};
 
-/// Extract and parse the `Content-Length` header from an HTTP response.
-pub fn extract_content_length(resp: &ureq::Response, context: &str) -> Result<u64> {
-    let header = resp.header("Content-Length").ok_or_else(|| {
+/// Extract and parse the `Content-Length` header from HTTP response headers.
+pub fn extract_content_length(headers: &http::HeaderMap, context: &str) -> Result<u64> {
+    let header = headers.get(http::header::CONTENT_LENGTH).ok_or_else(|| {
         VykarError::Other(format!("{context}: response missing Content-Length header"))
     })?;
-    header.parse::<u64>().map_err(|_| {
-        VykarError::Other(format!(
-            "{context}: invalid Content-Length header: {header}"
-        ))
-    })
+    let val = header
+        .to_str()
+        .map_err(|_| VykarError::Other(format!("{context}: non-ASCII Content-Length header")))?;
+    val.parse::<u64>()
+        .map_err(|_| VykarError::Other(format!("{context}: invalid Content-Length header: {val}")))
 }

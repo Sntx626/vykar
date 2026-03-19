@@ -31,7 +31,8 @@ percent-encoding = "2"
 
 # HTTP client (S3 + REST backends)
 rusty-s3 = "0.8"
-ureq = { version = "2", features = ["json"] }
+ureq = { version = "3", features = ["json"] }
+http = "1"
 
 # Logging
 tracing.workspace = true
@@ -43,7 +44,7 @@ tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"], optional = true }
 
 # SSH/SFTP
-russh = { version = "0.54", default-features = false, features = ["aws-lc-rs"], optional = true }
+russh = { version = "0.58", default-features = false, features = ["aws-lc-rs"], optional = true }
 russh-sftp = { version = "2.1", optional = true }
 
 [features]
@@ -51,4 +52,4 @@ default = []
 backend-sftp = ["russh", "russh-sftp", "tokio"]
 
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.29", features = ["user"] }
+nix = { version = "0.31", features = ["user"] }

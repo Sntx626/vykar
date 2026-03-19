@@ -7,6 +7,7 @@ use percent_encoding::percent_decode_str;
 use rusty_s3::actions::{ListObjectsV2, S3Action};
 use rusty_s3::{Bucket, Credentials, UrlStyle};
 
+use crate::retry::HttpRetryError;
 use crate::RetryConfig;
 use vykar_types::error::{Result, VykarError};
 
@@ -57,11 +58,13 @@ impl S3Backend {
 
         let credentials = Credentials::new(access_key_id, secret_access_key);
 
-        let agent = ureq::AgentBuilder::new()
-            .timeout_connect(Duration::from_secs(30))
-            .timeout_read(Duration::from_secs(300))
-            .timeout_write(Duration::from_secs(300))
-            .build();
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .timeout_connect(Some(Duration::from_secs(30)))
+            .timeout_send_body(Some(Duration::from_secs(300)))
+            .timeout_recv_body(Some(Duration::from_secs(300)))
+            .build()
+            .into();
 
         // Normalize root: strip leading/trailing slashes, ensure trailing slash if non-empty.
         let root = root.trim_matches('/').to_string();
@@ -85,30 +88,52 @@ impl S3Backend {
         }
     }
 
-    /// Retry a closure on transient errors with exponential backoff + jitter.
-    #[allow(clippy::result_large_err)]
+    /// Unified retry wrapper for HTTP calls with response handling.
     fn retry_call<T>(
         &self,
         op_name: &str,
-        f: impl Fn() -> std::result::Result<T, ureq::Error>,
-    ) -> std::result::Result<T, ureq::Error> {
-        crate::retry::retry_http(&self.retry, op_name, "S3", f)
+        f: impl Fn() -> std::result::Result<http::Response<ureq::Body>, ureq::Error>,
+        handle_response: impl Fn(http::Response<ureq::Body>) -> std::result::Result<T, HttpRetryError>,
+    ) -> std::result::Result<T, HttpRetryError> {
+        crate::retry::retry_http(&self.retry, op_name, "S3", f, handle_response)
     }
+}
 
-    /// Retry a closure that performs both HTTP request and body read.
-    fn retry_call_body<T>(
-        &self,
-        op_name: &str,
-        f: impl Fn() -> std::result::Result<T, crate::retry::HttpRetryError>,
-    ) -> std::result::Result<T, crate::retry::HttpRetryError> {
-        crate::retry::retry_http_body(&self.retry, op_name, "S3", f)
+/// Check an HTTP response status for S3 operations, reading the error body for
+/// diagnostics on 4xx/5xx responses.
+///
+/// Returns `Ok(())` for success status codes (< 400). For error statuses,
+/// reads the S3 XML error body before classifying for retry.
+fn s3_check_status(
+    resp: &mut http::Response<ureq::Body>,
+    op: &str,
+    key: &str,
+) -> std::result::Result<(), HttpRetryError> {
+    let status = resp.status().as_u16();
+    if status < 400 {
+        return Ok(());
     }
+    // Read error body for diagnostics — S3 returns XML with error details.
+    let body = resp.body_mut().read_to_string().unwrap_or_default();
+    let truncated;
+    let display_body = if body.len() > 1024 {
+        truncated = format!("{}...(truncated)", &body[..body.floor_char_boundary(1024)]);
+        &truncated
+    } else {
+        &body
+    };
+    tracing::debug!("S3 {op} {key}: HTTP {status}: {display_body}");
+    crate::retry::classify_status(status, format!("HTTP {status}: {display_body}"))
+}
+
+/// Convert an [`HttpRetryError`] into a `VykarError` for S3 operations.
+fn s3_error(op: &str, key: &str, err: HttpRetryError) -> VykarError {
+    VykarError::Other(format!("S3 {op} {key}: {err}"))
 }
 
 #[allow(clippy::result_large_err)]
 impl StorageBackend for S3Backend {
     fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
-        use crate::retry::HttpRetryError;
         let full_key = self.full_key(key);
         let url = self
             .bucket
@@ -116,24 +141,28 @@ impl StorageBackend for S3Backend {
             .sign(PRESIGN_DURATION);
 
         let soft_delete = self.soft_delete;
-        self.retry_call_body(&format!("GET {key}"), || {
-            match self.agent.get(url.as_str()).call() {
-                Ok(resp) => {
-                    let mut buf = Vec::new();
-                    resp.into_reader()
-                        .read_to_end(&mut buf)
-                        .map_err(HttpRetryError::BodyIo)?;
-                    // Treat zero-byte objects as tombstones (soft-deleted).
-                    if soft_delete && buf.is_empty() {
-                        return Ok(None);
-                    }
-                    Ok(Some(buf))
+        self.retry_call(
+            &format!("GET {key}"),
+            || self.agent.get(url.as_str()).call(),
+            |mut resp| {
+                let status = resp.status().as_u16();
+                if status == 404 {
+                    return Ok(None);
                 }
-                Err(ureq::Error::Status(404, _)) => Ok(None),
-                Err(e) => Err(HttpRetryError::http(e)),
-            }
-        })
-        .map_err(|e| s3_body_error("GET", key, e))
+                s3_check_status(&mut resp, "GET", key)?;
+                let mut buf = Vec::new();
+                resp.body_mut()
+                    .as_reader()
+                    .read_to_end(&mut buf)
+                    .map_err(HttpRetryError::BodyIo)?;
+                // Treat zero-byte objects as tombstones (soft-deleted).
+                if soft_delete && buf.is_empty() {
+                    return Ok(None);
+                }
+                Ok(Some(buf))
+            },
+        )
+        .map_err(|e| s3_error("GET", key, e))
     }
 
     fn put(&self, key: &str, data: &[u8]) -> Result<()> {
@@ -157,9 +186,11 @@ impl StorageBackend for S3Backend {
             .delete_object(Some(&self.credentials), &full_key)
             .sign(PRESIGN_DURATION);
 
-        self.retry_call(&format!("DELETE {key}"), || {
-            self.agent.delete(url.as_str()).call()
-        })
+        self.retry_call(
+            &format!("DELETE {key}"),
+            || self.agent.delete(url.as_str()).call(),
+            |mut resp| s3_check_status(&mut resp, "DELETE", key),
+        )
         .map_err(|e| s3_error("DELETE", key, e))?;
         Ok(())
     }
@@ -171,21 +202,29 @@ impl StorageBackend for S3Backend {
             .head_object(Some(&self.credentials), &full_key)
             .sign(PRESIGN_DURATION);
 
-        match self.retry_call(&format!("HEAD {key}"), || {
-            self.agent.head(url.as_str()).call()
-        }) {
-            Ok(resp) => {
-                if self.soft_delete {
-                    let len =
-                        crate::http_util::extract_content_length(&resp, &format!("S3 HEAD {key}"))?;
+        let soft_delete = self.soft_delete;
+        self.retry_call(
+            &format!("HEAD {key}"),
+            || self.agent.head(url.as_str()).call(),
+            |mut resp| {
+                let status = resp.status().as_u16();
+                if status == 404 {
+                    return Ok(false);
+                }
+                s3_check_status(&mut resp, "HEAD", key)?;
+                if soft_delete {
+                    let len = crate::http_util::extract_content_length(
+                        resp.headers(),
+                        &format!("S3 HEAD {key}"),
+                    )
+                    .map_err(|e| HttpRetryError::Permanent(e.to_string()))?;
                     Ok(len > 0)
                 } else {
                     Ok(true)
                 }
-            }
-            Err(ureq::Error::Status(404, _)) => Ok(false),
-            Err(e) => Err(s3_error("HEAD", key, e)),
-        }
+            },
+        )
+        .map_err(|e| s3_error("HEAD", key, e))
     }
 
     fn size(&self, key: &str) -> Result<Option<u64>> {
@@ -195,25 +234,32 @@ impl StorageBackend for S3Backend {
             .head_object(Some(&self.credentials), &full_key)
             .sign(PRESIGN_DURATION);
 
-        match self.retry_call(&format!("HEAD {key}"), || {
-            self.agent.head(url.as_str()).call()
-        }) {
-            Ok(resp) => {
-                let len =
-                    crate::http_util::extract_content_length(&resp, &format!("S3 HEAD {key}"))?;
+        let soft_delete = self.soft_delete;
+        self.retry_call(
+            &format!("HEAD {key}"),
+            || self.agent.head(url.as_str()).call(),
+            |mut resp| {
+                let status = resp.status().as_u16();
+                if status == 404 {
+                    return Ok(None);
+                }
+                s3_check_status(&mut resp, "HEAD", key)?;
+                let len = crate::http_util::extract_content_length(
+                    resp.headers(),
+                    &format!("S3 HEAD {key}"),
+                )
+                .map_err(|e| HttpRetryError::Permanent(e.to_string()))?;
                 // Treat zero-byte objects as tombstones (soft-deleted).
-                if self.soft_delete && len == 0 {
+                if soft_delete && len == 0 {
                     return Ok(None);
                 }
                 Ok(Some(len))
-            }
-            Err(ureq::Error::Status(404, _)) => Ok(None),
-            Err(e) => Err(s3_error("HEAD", key, e)),
-        }
+            },
+        )
+        .map_err(|e| s3_error("HEAD", key, e))
     }
 
     fn list(&self, prefix: &str) -> Result<Vec<String>> {
-        use crate::retry::HttpRetryError;
         let full_prefix = self.full_key(prefix);
         let root_prefix_len = if self.root.is_empty() {
             0
@@ -233,23 +279,24 @@ impl StorageBackend for S3Backend {
             let url = action.sign(PRESIGN_DURATION);
 
             let parsed = self
-                .retry_call_body(&format!("LIST {prefix}"), || {
-                    let resp = self
-                        .agent
-                        .get(url.as_str())
-                        .call()
-                        .map_err(HttpRetryError::http)?;
-                    let mut body = Vec::new();
-                    resp.into_reader()
-                        .read_to_end(&mut body)
-                        .map_err(HttpRetryError::BodyIo)?;
-                    ListObjectsV2::parse_response(&body).map_err(|e| {
-                        HttpRetryError::Permanent(format!(
-                            "S3 LIST {prefix}: failed to parse response: {e}"
-                        ))
-                    })
-                })
-                .map_err(|e| s3_body_error("LIST", prefix, e))?;
+                .retry_call(
+                    &format!("LIST {prefix}"),
+                    || self.agent.get(url.as_str()).call(),
+                    |mut resp| {
+                        s3_check_status(&mut resp, "LIST", prefix)?;
+                        let mut body = Vec::new();
+                        resp.body_mut()
+                            .as_reader()
+                            .read_to_end(&mut body)
+                            .map_err(HttpRetryError::BodyIo)?;
+                        ListObjectsV2::parse_response(&body).map_err(|e| {
+                            HttpRetryError::Permanent(format!(
+                                "S3 LIST {prefix}: failed to parse response: {e}"
+                            ))
+                        })
+                    },
+                )
+                .map_err(|e| s3_error("LIST", prefix, e))?;
 
             for obj in &parsed.contents {
                 // rusty_s3 sends encoding-type=url; some S3-compatible backends
@@ -285,7 +332,6 @@ impl StorageBackend for S3Backend {
     }
 
     fn get_range(&self, key: &str, offset: u64, length: u64) -> Result<Option<Vec<u8>>> {
-        use crate::retry::HttpRetryError;
         if length == 0 {
             return Err(VykarError::Other(format!(
                 "S3 GET_RANGE {key}: zero-length read requested"
@@ -312,54 +358,59 @@ impl StorageBackend for S3Backend {
         action.headers_mut().insert("range", &range_header);
         let url = action.sign(PRESIGN_DURATION);
 
-        self.retry_call_body(&format!("GET_RANGE {key}"), || {
-            match self
-                .agent
-                .get(url.as_str())
-                .set("range", &range_header)
-                .call()
-            {
-                Ok(resp) => {
-                    let status = resp.status();
-                    if status == 200 {
-                        return Err(HttpRetryError::Permanent(format!(
-                            "S3 GET_RANGE {key}: server returned 200 instead of 206 (Range header ignored)"
-                        )));
-                    }
-                    if status != 206 {
-                        return Err(HttpRetryError::Permanent(format!(
-                            "S3 GET_RANGE {key}: unexpected status {status}"
-                        )));
-                    }
-                    let cap = match usize::try_from(length) {
-                        Ok(c) => c,
-                        Err(_) => {
-                            return Err(HttpRetryError::Permanent(format!(
-                                "S3 GET_RANGE {key}: length {length} exceeds platform usize"
-                            )));
-                        }
-                    };
-                    let mut buf = Vec::with_capacity(cap);
-                    resp.into_reader()
-                        .take(length)
-                        .read_to_end(&mut buf)
-                        .map_err(HttpRetryError::BodyIo)?;
-                    if buf.len() != cap {
-                        return Err(HttpRetryError::BodyIo(std::io::Error::new(
-                            std::io::ErrorKind::UnexpectedEof,
-                            format!(
-                                "short read on {key} at offset {offset}: expected {length} bytes, got {}",
-                                buf.len()
-                            ),
-                        )));
-                    }
-                    Ok(Some(buf))
+        self.retry_call(
+            &format!("GET_RANGE {key}"),
+            || {
+                self.agent
+                    .get(url.as_str())
+                    .header("range", &range_header)
+                    .call()
+            },
+            |mut resp| {
+                let status = resp.status().as_u16();
+                if status == 404 {
+                    return Ok(None);
                 }
-                Err(ureq::Error::Status(404, _)) => Ok(None),
-                Err(e) => Err(HttpRetryError::http(e)),
-            }
-        })
-        .map_err(|e| s3_body_error("GET_RANGE", key, e))
+                if status >= 400 {
+                    s3_check_status(&mut resp, "GET_RANGE", key)?;
+                }
+                if status == 200 {
+                    return Err(HttpRetryError::Permanent(format!(
+                        "S3 GET_RANGE {key}: server returned 200 instead of 206 (Range header ignored)"
+                    )));
+                }
+                if status != 206 {
+                    return Err(HttpRetryError::Permanent(format!(
+                        "S3 GET_RANGE {key}: unexpected status {status}"
+                    )));
+                }
+                let cap = match usize::try_from(length) {
+                    Ok(c) => c,
+                    Err(_) => {
+                        return Err(HttpRetryError::Permanent(format!(
+                            "S3 GET_RANGE {key}: length {length} exceeds platform usize"
+                        )));
+                    }
+                };
+                let mut buf = Vec::with_capacity(cap);
+                resp.body_mut()
+                    .as_reader()
+                    .take(length)
+                    .read_to_end(&mut buf)
+                    .map_err(HttpRetryError::BodyIo)?;
+                if buf.len() != cap {
+                    return Err(HttpRetryError::BodyIo(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        format!(
+                            "short read on {key} at offset {offset}: expected {length} bytes, got {}",
+                            buf.len()
+                        ),
+                    )));
+                }
+                Ok(Some(buf))
+            },
+        )
+        .map_err(|e| s3_error("GET_RANGE", key, e))
     }
 
     fn create_dir(&self, key: &str) -> Result<()> {
@@ -376,44 +427,19 @@ impl StorageBackend for S3Backend {
         action.headers_mut().insert("content-md5", &content_md5);
         let url = action.sign(PRESIGN_DURATION);
 
-        self.retry_call(&format!("MKDIR {key}"), || {
-            self.agent
-                .put(url.as_str())
-                .set("content-type", content_type)
-                .set("content-md5", &content_md5)
-                .send_bytes(&[])
-        })
+        self.retry_call(
+            &format!("MKDIR {key}"),
+            || {
+                self.agent
+                    .put(url.as_str())
+                    .header("content-type", content_type)
+                    .header("content-md5", &content_md5)
+                    .send(&[] as &[u8])
+            },
+            |mut resp| s3_check_status(&mut resp, "MKDIR", key),
+        )
         .map_err(|e| s3_error("MKDIR", key, e))?;
         Ok(())
-    }
-}
-
-/// Convert a `ureq::Error` into `VykarError`, extracting the S3 XML
-/// response body from HTTP status errors for diagnostic logging.
-fn s3_error(op: &str, key: &str, err: ureq::Error) -> VykarError {
-    match err {
-        ureq::Error::Status(code, response) => {
-            let body = response.into_string().unwrap_or_default();
-            // Truncate excessively long error bodies.
-            let truncated;
-            let body = if body.len() > 1024 {
-                truncated = format!("{}...(truncated)", &body[..body.floor_char_boundary(1024)]);
-                &truncated
-            } else {
-                &body
-            };
-            tracing::debug!("S3 {op} {key}: HTTP {code}: {body}");
-            VykarError::Other(format!("S3 {op} {key}: HTTP {code}: {body}"))
-        }
-        ureq::Error::Transport(t) => VykarError::Other(format!("S3 {op} {key}: {t}")),
-    }
-}
-
-/// Like [`s3_error`] but accepts [`HttpRetryError`](crate::retry::HttpRetryError).
-fn s3_body_error(op: &str, key: &str, err: crate::retry::HttpRetryError) -> VykarError {
-    match err {
-        crate::retry::HttpRetryError::Http(e) => s3_error(op, key, *e),
-        other => VykarError::Other(format!("S3 {op} {key}: {other}")),
     }
 }
 
@@ -432,13 +458,17 @@ impl S3Backend {
         action.headers_mut().insert("content-md5", &content_md5);
         let url = action.sign(PRESIGN_DURATION);
 
-        self.retry_call(&format!("PUT {key}"), || {
-            self.agent
-                .put(url.as_str())
-                .set("content-type", content_type)
-                .set("content-md5", &content_md5)
-                .send_bytes(data)
-        })
+        self.retry_call(
+            &format!("PUT {key}"),
+            || {
+                self.agent
+                    .put(url.as_str())
+                    .header("content-type", content_type)
+                    .header("content-md5", &content_md5)
+                    .send(data)
+            },
+            |mut resp| s3_check_status(&mut resp, "PUT", key),
+        )
         .map_err(|e| s3_error("PUT", key, e))?;
         Ok(())
     }
