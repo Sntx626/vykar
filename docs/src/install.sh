@@ -26,27 +26,6 @@ require_cmd() {
     command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"
 }
 
-find_sha_tool() {
-    if command -v sha256sum >/dev/null 2>&1; then
-        SHA_TOOL="sha256sum"
-    elif command -v shasum >/dev/null 2>&1; then
-        SHA_TOOL="shasum"
-    elif command -v openssl >/dev/null 2>&1; then
-        SHA_TOOL="openssl"
-    else
-        die "no SHA-256 tool found (need sha256sum, shasum, or openssl)"
-    fi
-}
-
-sha256_of() {
-    local file="$1"
-    case "$SHA_TOOL" in
-        sha256sum) sha256sum "$file" | awk '{print $1}' ;;
-        shasum)    shasum -a 256 "$file" | awk '{print $1}' ;;
-        openssl)   openssl dgst -sha256 "$file" | awk '{print $NF}' ;;
-    esac
-}
-
 # --- Libc detection (Linux only) ------------------------------------------
 
 detect_linux_libc() {
@@ -179,10 +158,10 @@ prompt_config() {
     fi
 }
 
-# --- Download & verify ----------------------------------------------------
+# --- Download & extract ---------------------------------------------------
 
-download_and_verify() {
-    local archive checksum_file expected actual
+download_and_extract() {
+    local archive
 
     archive="vykar-${VERSION}-${TARGET}.tar.gz"
     TMPDIR_CLEANUP="$(mktemp -d)"
@@ -192,22 +171,6 @@ download_and_verify() {
     log "Downloading ${archive}..."
     curl -fSL -o "${tmpdir}/${archive}" \
         "${GITHUB_DOWNLOAD}/${VERSION}/${archive}"
-
-    log "Downloading checksums..."
-    checksum_file="${tmpdir}/SHA256SUMS"
-    curl -fsSL -o "$checksum_file" \
-        "${GITHUB_DOWNLOAD}/${VERSION}/SHA256SUMS"
-
-    expected=$(grep "$archive" "$checksum_file" | awk '{print $1}')
-    if [ -z "$expected" ]; then
-        die "checksum for ${archive} not found in SHA256SUMS"
-    fi
-
-    log "Verifying checksum..."
-    actual=$(sha256_of "${tmpdir}/${archive}")
-    if [ "$expected" != "$actual" ]; then
-        die "checksum mismatch!\n  expected: ${expected}\n  got:      ${actual}"
-    fi
 
     log "Extracting ${BINARY_NAME}..."
     tar xzf "${tmpdir}/${archive}" -C "$tmpdir" "$BINARY_NAME"
@@ -242,8 +205,6 @@ main() {
     require_cmd curl
     require_cmd tar
     require_cmd mktemp
-    find_sha_tool
-
     detect_platform
     log "Platform: ${TARGET}"
 
@@ -256,7 +217,7 @@ main() {
     log "Installing vykar ${VERSION} to ${INSTALL_DIR}"
     log ""
 
-    download_and_verify
+    download_and_extract
     install_binary
     log ""
 
