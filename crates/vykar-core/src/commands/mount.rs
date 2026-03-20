@@ -275,7 +275,7 @@ fn classify_browser_request<B>(req: &hyper::Request<B>, tree: &VfsNode) -> Brows
     }
 }
 
-fn render_directory_html(path: &str, tree: &VfsNode) -> String {
+fn render_directory_html(path: &str, tree: &VfsNode, is_snapshot_root: bool) -> String {
     let node = lookup(tree, path.as_bytes());
     let children = match node {
         Some(VfsNode::Dir { children, .. }) => children,
@@ -291,7 +291,17 @@ fn render_directory_html(path: &str, tree: &VfsNode) -> String {
             _ => files.push((name, child)),
         }
     }
-    dirs.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+    if is_snapshot_root {
+        // Snapshot root: sort by mtime descending (newest first), name tie-breaker
+        dirs.sort_by(|a, b| {
+            node_meta(b.1)
+                .mtime
+                .cmp(&node_meta(a.1).mtime)
+                .then_with(|| a.0.to_lowercase().cmp(&b.0.to_lowercase()))
+        });
+    } else {
+        dirs.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+    }
     files.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
 
     let display_path = if path.is_empty() || path == "/" {
@@ -325,7 +335,7 @@ fn render_directory_html(path: &str, tree: &VfsNode) -> String {
     // Parent directory link
     if path != "/" && !path.is_empty() {
         rows.push_str(
-            r#"<tr><td class="icon">📁</td><td><a href="../">../</a></td><td class="size"></td><td class="mtime"></td></tr>
+            r#"<tr data-parent="1"><td class="icon">📁</td><td data-sort="-1"><a href="../">../</a></td><td class="size" data-sort="-1">—</td><td class="mtime" data-sort="-1"></td></tr>
 "#,
         );
     }
@@ -333,8 +343,14 @@ fn render_directory_html(path: &str, tree: &VfsNode) -> String {
     for (name, child) in &dirs {
         let meta = node_meta(child);
         let mtime = format_mtime(meta.mtime);
+        let mtime_ms = meta
+            .mtime
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let name_sort = html_escape(&name.to_lowercase());
         rows.push_str(&format!(
-            r#"<tr><td class="icon">📁</td><td><a href="{}/"><strong>{}/</strong></a></td><td class="size">—</td><td class="mtime">{}</td></tr>
+            r#"<tr><td class="icon">📁</td><td data-sort="{name_sort}"><a href="{}/"><strong>{}/</strong></a></td><td class="size" data-sort="0" data-dir="1">—</td><td class="mtime" data-sort="{mtime_ms}">{}</td></tr>
 "#,
             percent_encode_path(name),
             html_escape(name),
@@ -345,6 +361,12 @@ fn render_directory_html(path: &str, tree: &VfsNode) -> String {
     for (name, child) in &files {
         let meta = node_meta(child);
         let mtime = format_mtime(meta.mtime);
+        let mtime_ms = meta
+            .mtime
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let name_sort = html_escape(&name.to_lowercase());
         let (icon, display) = match child {
             VfsNode::Symlink { _target, .. } => (
                 "🔗",
@@ -353,13 +375,20 @@ fn render_directory_html(path: &str, tree: &VfsNode) -> String {
             _ => ("📄", html_escape(name)),
         };
         rows.push_str(&format!(
-            r#"<tr><td class="icon">{icon}</td><td><a href="{}">{display}</a></td><td class="size">{}</td><td class="mtime">{}</td></tr>
+            r#"<tr><td class="icon">{icon}</td><td data-sort="{name_sort}"><a href="{}">{display}</a></td><td class="size" data-sort="{}">{}</td><td class="mtime" data-sort="{mtime_ms}">{}</td></tr>
 "#,
             percent_encode_path(name),
+            meta.size,
             format_size(meta.size),
             mtime,
         ));
     }
+
+    let (sort_col, sort_dir) = if is_snapshot_root {
+        ("3", "desc")
+    } else {
+        ("1", "asc")
+    };
 
     format!(
         r##"<!DOCTYPE html>
@@ -388,18 +417,88 @@ a:hover {{ text-decoration: underline; }}
 .icon {{ width: 1.5rem; text-align: center; }}
 .size {{ text-align: right; color: var(--muted); white-space: nowrap; }}
 .mtime {{ color: var(--muted); white-space: nowrap; }}
+th.sortable {{ cursor: pointer; user-select: none; }}
+th.sortable:hover {{ color: var(--fg); }}
+.sort-arrow {{ font-size: 0.7em; margin-left: 0.3em; }}
+th.sort-asc .sort-arrow::after {{ content: "\25B2"; }}
+th.sort-desc .sort-arrow::after {{ content: "\25BC"; }}
 footer {{ margin-top: 2rem; font-size: 0.75rem; color: var(--muted); }}
 </style>
 </head>
 <body>
 <h1>{title}</h1>
 <div class="breadcrumbs">{breadcrumbs}</div>
-<table>
-<thead><tr><th></th><th>Name</th><th style="text-align:right">Size</th><th>Modified</th></tr></thead>
+<table data-sort-col="{sort_col}" data-sort-dir="{sort_dir}">
+<thead><tr><th></th><th class="sortable" data-col="1" data-type="text">Name <span class="sort-arrow"></span></th><th class="sortable" data-col="2" data-type="num" style="text-align:right">Size <span class="sort-arrow"></span></th><th class="sortable" data-col="3" data-type="num">Modified <span class="sort-arrow"></span></th></tr></thead>
 <tbody>
 {rows}</tbody>
 </table>
 <footer>vykar backup — WebDAV + Web UI</footer>
+<script>
+(function() {{
+  var table = document.querySelector("table");
+  var thead = table.querySelector("thead tr");
+  var tbody = table.querySelector("tbody");
+  var col = parseInt(table.dataset.sortCol, 10);
+  var dir = table.dataset.sortDir;
+
+  function setArrow(c, d) {{
+    thead.querySelectorAll("th.sortable").forEach(function(th) {{
+      th.classList.remove("sort-asc", "sort-desc");
+    }});
+    var th = thead.querySelector('th[data-col="' + c + '"]');
+    if (th) th.classList.add("sort-" + d);
+  }}
+  setArrow(col, dir);
+
+  thead.addEventListener("click", function(e) {{
+    var th = e.target.closest("th.sortable");
+    if (!th) return;
+    var c = parseInt(th.dataset.col, 10);
+    var type = th.dataset.type;
+    if (c === col) {{
+      dir = dir === "asc" ? "desc" : "asc";
+    }} else {{
+      col = c;
+      dir = type === "text" ? "asc" : "desc";
+    }}
+    setArrow(col, dir);
+    sortRows(col, dir, type);
+  }});
+
+  function sortRows(c, d, type) {{
+    var rows = Array.from(tbody.querySelectorAll("tr"));
+    var parent = [];
+    var rest = [];
+    rows.forEach(function(r) {{
+      if (r.dataset.parent === "1") parent.push(r);
+      else rest.push(r);
+    }});
+    rest.sort(function(a, b) {{
+      var ca = a.cells[c];
+      var cb = b.cells[c];
+      var va = ca.dataset.sort;
+      var vb = cb.dataset.sort;
+      var result;
+      if (type === "num") {{
+        var na = parseFloat(va) || 0;
+        var nb = parseFloat(vb) || 0;
+        result = na - nb;
+        if (result === 0) {{
+          result = (a.cells[1].dataset.sort || "").localeCompare(b.cells[1].dataset.sort || "");
+        }}
+      }} else {{
+        var da = ca.dataset.dir === "1" ? 0 : 1;
+        var db = cb.dataset.dir === "1" ? 0 : 1;
+        if (da !== db) return da - db;
+        result = (va || "").localeCompare(vb || "");
+      }}
+      return d === "asc" ? result : -result;
+    }});
+    parent.concat(rest).forEach(function(r) {{ tbody.appendChild(r); }});
+  }}
+}})();
+</script>
 </body>
 </html>"##
     )
@@ -779,13 +878,15 @@ pub fn run_with_progress(
     let rt = tokio::runtime::Runtime::new()
         .map_err(|e| VykarError::Other(format!("failed to create tokio runtime: {e}")))?;
 
-    rt.block_on(async { serve(handler, tree, address, &mut progress).await })
+    let is_multi_snapshot = snapshot_name.is_none();
+    rt.block_on(async { serve(handler, tree, address, is_multi_snapshot, &mut progress).await })
 }
 
 async fn serve(
     handler: DavHandler,
     tree: Arc<VfsNode>,
     address: &str,
+    is_multi_snapshot: bool,
     progress: &mut Option<&mut dyn FnMut(MountProgressEvent)>,
 ) -> Result<()> {
     let addr: std::net::SocketAddr = address
@@ -823,7 +924,9 @@ async fn serve(
                                         BrowserAction::ServeHtml => {
                                             let raw_path = req.uri().path().to_string();
                                             let decoded = percent_decode_str(&raw_path).decode_utf8_lossy();
-                                            let html = render_directory_html(&decoded, &tree);
+                                            let is_snapshot_root = is_multi_snapshot
+                                                && decoded.trim_matches('/').is_empty();
+                                            let html = render_directory_html(&decoded, &tree, is_snapshot_root);
                                             let resp = hyper::Response::builder()
                                                 .status(200)
                                                 .header("content-type", "text/html; charset=utf-8")
@@ -921,10 +1024,126 @@ mod tests {
         let tree = tree_with_dir("form c");
         // After decoding, render_directory_html should find the "form c" dir.
         let decoded = percent_decode_str("/form%20c/").decode_utf8_lossy();
-        let html = render_directory_html(&decoded, &tree);
+        let html = render_directory_html(&decoded, &tree, false);
         assert!(
             !html.contains("Not Found"),
             "decoded path should resolve the directory"
+        );
+    }
+
+    /// Helper: build a VFS tree with multiple snapshot dirs at root, each with a given mtime.
+    fn tree_with_snapshots(snapshots: &[(&str, SystemTime)]) -> VfsNode {
+        let mut children = HashMap::new();
+        for (name, mtime) in snapshots {
+            children.insert(
+                name.to_string(),
+                VfsNode::Dir {
+                    children: HashMap::new(),
+                    meta: VfsMeta {
+                        size: 0,
+                        mtime: *mtime,
+                        is_dir: true,
+                        is_symlink: false,
+                    },
+                },
+            );
+        }
+        VfsNode::Dir {
+            children,
+            meta: VfsMeta::dir_default(),
+        }
+    }
+
+    /// Helper: build a VFS tree with files at root for testing data-sort attributes.
+    fn tree_with_files(files: &[(&str, u64, SystemTime)]) -> VfsNode {
+        let mut children = HashMap::new();
+        for (name, size, mtime) in files {
+            children.insert(
+                name.to_string(),
+                VfsNode::File {
+                    chunks: vec![],
+                    meta: VfsMeta {
+                        size: *size,
+                        mtime: *mtime,
+                        is_dir: false,
+                        is_symlink: false,
+                    },
+                },
+            );
+        }
+        VfsNode::Dir {
+            children,
+            meta: VfsMeta::dir_default(),
+        }
+    }
+
+    #[test]
+    fn test_snapshot_root_sort_order() {
+        let t1 = UNIX_EPOCH + std::time::Duration::from_secs(1000);
+        let t2 = UNIX_EPOCH + std::time::Duration::from_secs(2000);
+        let t3 = UNIX_EPOCH + std::time::Duration::from_secs(3000);
+        let tree = tree_with_snapshots(&[("snap-old", t1), ("snap-new", t3), ("snap-mid", t2)]);
+        let html = render_directory_html("/", &tree, true);
+        // Newest first: snap-new before snap-mid before snap-old
+        let pos_new = html.find("snap-new").expect("snap-new should appear");
+        let pos_mid = html.find("snap-mid").expect("snap-mid should appear");
+        let pos_old = html.find("snap-old").expect("snap-old should appear");
+        assert!(
+            pos_new < pos_mid && pos_mid < pos_old,
+            "snapshot root should sort by mtime descending: new={pos_new}, mid={pos_mid}, old={pos_old}"
+        );
+    }
+
+    #[test]
+    fn test_data_sort_attributes() {
+        let mtime = UNIX_EPOCH + std::time::Duration::from_secs(1_700_000);
+        let tree = tree_with_files(&[("readme.txt", 4096, mtime)]);
+        let html = render_directory_html("/", &tree, false);
+        // File size data-sort should be the raw byte count
+        assert!(
+            html.contains(r#"data-sort="4096""#),
+            "file row should have data-sort with raw byte count"
+        );
+        // File mtime data-sort should be millis since epoch
+        let expected_ms = format!("data-sort=\"{}\"", 1_700_000u128 * 1000);
+        assert!(
+            html.contains(&expected_ms),
+            "file row should have data-sort with mtime in millis"
+        );
+    }
+
+    #[test]
+    fn test_sortable_headers_present() {
+        let tree = tree_with_dir("test");
+        let html = render_directory_html("/", &tree, false);
+        assert!(
+            html.contains(r#"class="sortable" data-col="1" data-type="text""#),
+            "Name header should be sortable"
+        );
+        assert!(
+            html.contains(r#"class="sortable" data-col="2" data-type="num""#),
+            "Size header should be sortable"
+        );
+        assert!(
+            html.contains(r#"class="sortable" data-col="3" data-type="num""#),
+            "Modified header should be sortable"
+        );
+    }
+
+    #[test]
+    fn test_initial_sort_attribute() {
+        let tree = tree_with_dir("test");
+        // Snapshot root: sort by modified descending
+        let html_root = render_directory_html("/", &tree, true);
+        assert!(
+            html_root.contains(r#"data-sort-col="3" data-sort-dir="desc""#),
+            "snapshot root table should default to col 3 desc"
+        );
+        // Inner directory: sort by name ascending
+        let html_inner = render_directory_html("/", &tree, false);
+        assert!(
+            html_inner.contains(r#"data-sort-col="1" data-sort-dir="asc""#),
+            "inner directory table should default to col 1 asc"
         );
     }
 }
