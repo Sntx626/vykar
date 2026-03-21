@@ -429,7 +429,7 @@ pub(crate) fn run_worker(
                         Err(e) => {
                             if matches!(e, VykarError::RepoNotFound(_)) {
                                 let confirmed = tinyfiledialogs::message_box_yes_no(
-                                    &format!("{APP_TITLE} — Repository Not Initialized"),
+                                    &format!("{APP_TITLE} - Repository Not Initialized"),
                                     &format!(
                                         "Repository {repo_name} at {url} is not initialized.\n\
                                          Would you like to initialize it now?",
@@ -463,7 +463,7 @@ pub(crate) fn run_worker(
                                             passphrase.clone()
                                         } else {
                                             let title = format!(
-                                                "{APP_TITLE} — New Passphrase ({repo_name})"
+                                                "{APP_TITLE} - New Passphrase ({repo_name})"
                                             );
                                             let p1 = tinyfiledialogs::password_box(
                                                 &title,
@@ -483,7 +483,7 @@ pub(crate) fn run_worker(
                                                 Some(p1_val) => {
                                                     let p2 = tinyfiledialogs::password_box(
                                                         &format!(
-                                                            "{APP_TITLE} — Confirm Passphrase \
+                                                            "{APP_TITLE} - Confirm Passphrase \
                                                              ({repo_name})"
                                                         ),
                                                         "Confirm passphrase:",

@@ -20,15 +20,14 @@ pub(crate) fn resolve_passphrase_for_repo(
 ) -> Result<Option<zeroize::Zeroizing<String>>, VykarError> {
     let repo_name = format_repo_name(repo);
     let pass = passphrase::resolve_passphrase(&repo.config, repo.label.as_deref(), |prompt| {
-        let title = format!("{APP_TITLE} — Passphrase ({repo_name})");
-        let message = format!(
-            "Enter passphrase for {}\nRepository: {}",
-            prompt
-                .repository_label
-                .as_deref()
-                .unwrap_or(prompt.repository_url.as_str()),
-            prompt.repository_url,
-        );
+        let title = format!("{APP_TITLE} - Passphrase ({repo_name})");
+        let message = match prompt.repository_label.as_deref() {
+            Some(label) if label != prompt.repository_url.as_str() => format!(
+                "Enter passphrase for {label}\nRepository: {}",
+                prompt.repository_url,
+            ),
+            _ => format!("Enter passphrase for {}", prompt.repository_url),
+        };
         let value = tinyfiledialogs::password_box(&title, &message);
         Ok(value.filter(|v| !v.is_empty()).map(zeroize::Zeroizing::new))
     })?;
