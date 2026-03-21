@@ -30,7 +30,19 @@ const APP_TITLE: &str = "Vykar Backup";
 
 slint::include_modules!();
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() {
+    if let Err(e) = run() {
+        let msg = format!("{APP_TITLE} failed to start:\n\n{e}");
+        tinyfiledialogs::message_box_ok(
+            &format!("{APP_TITLE} \u{2014} Error"),
+            &msg,
+            tinyfiledialogs::MessageBoxIcon::Error,
+        );
+        std::process::exit(1);
+    }
+}
+
+fn run() -> Result<(), Box<dyn std::error::Error>> {
     // tray-icon uses GTK widgets internally on Linux; GTK must be
     // initialised before any Menu / MenuItem is created.
     #[cfg(target_os = "linux")]
@@ -72,6 +84,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (sched_notify_tx, sched_notify_rx) = crossbeam_channel::bounded::<()>(1);
 
+    // ── Fallible UI / tray initialization (before spawning any threads) ──
+
+    let ui = MainWindow::new()?;
+    if let (Some(w), Some(h)) = (gui_state.window_width, gui_state.window_height) {
+        ui.window().set_size(slint::LogicalSize::new(w, h));
+    }
+    ui.set_config_path("(loading...)".into());
+    ui.set_schedule_text("(loading...)".into());
+    ui.set_editor_font_family(
+        if cfg!(target_os = "macos") {
+            "Menlo"
+        } else if cfg!(target_os = "windows") {
+            "Consolas"
+        } else {
+            "DejaVu Sans Mono"
+        }
+        .into(),
+    );
+    ui.set_status_text("Idle".into());
+
+    // Seed the AppData global with the initial config path.
+    ui.global::<AppData>()
+        .set_active_config_path(initial_config_path.into());
+
+    let (_tray_icon, open_item_id, run_now_item_id, quit_item_id, source_submenu, cancel_item_id) =
+        tray::build_tray_icon().map_err(|e| format!("failed to initialize tray icon: {e}"))?;
+
+    // Store the submenu in a thread-local so the event consumer can rebuild it
+    // directly from invoke_from_event_loop (no polling timer needed).
+    tray_state::set_submenu(source_submenu);
+
+    // ── Background threads (only after all fallible init succeeded) ──
+
     scheduler::spawn_scheduler(
         app_tx.clone(),
         ui_tx.clone(),
@@ -102,28 +147,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
         }
     });
-
-    let ui = MainWindow::new()?;
-    if let (Some(w), Some(h)) = (gui_state.window_width, gui_state.window_height) {
-        ui.window().set_size(slint::LogicalSize::new(w, h));
-    }
-    ui.set_config_path("(loading...)".into());
-    ui.set_schedule_text("(loading...)".into());
-    ui.set_editor_font_family(
-        if cfg!(target_os = "macos") {
-            "Menlo"
-        } else if cfg!(target_os = "windows") {
-            "Consolas"
-        } else {
-            "DejaVu Sans Mono"
-        }
-        .into(),
-    );
-    ui.set_status_text("Idle".into());
-
-    // Seed the AppData global with the initial config path.
-    ui.global::<AppData>()
-        .set_active_config_path(initial_config_path.into());
 
     // snapshot_data stays as Arc<Mutex> — complex Rust struct used by sort_snapshot_table.
     let snapshot_data: Arc<Mutex<Vec<SnapshotRowData>>> = Arc::new(Mutex::new(Vec::new()));
@@ -189,14 +212,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // ── Tray icon ──
-
-    let (_tray_icon, open_item_id, run_now_item_id, quit_item_id, source_submenu, cancel_item_id) =
-        tray::build_tray_icon().map_err(|e| format!("failed to initialize tray icon: {e}"))?;
-
-    // Store the submenu in a thread-local so the event consumer can rebuild it
-    // directly from invoke_from_event_loop (no polling timer needed).
-    tray_state::set_submenu(source_submenu);
+    // ── Tray event handler ──
 
     {
         let tx = app_tx.clone();
