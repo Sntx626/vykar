@@ -523,12 +523,23 @@ fn normalize_sftp_timeout(requested: Option<u64>) -> u64 {
         .clamp(MIN_SFTP_TIMEOUT_SECS, MAX_SFTP_TIMEOUT_SECS)
 }
 
-fn join_root_key(root: &str, key: &str) -> String {
-    let key = key.trim_start_matches('/');
-    if key.is_empty() {
-        return root.to_string();
+/// Join two POSIX path segments with `/`. Never uses `std::path::Path`,
+/// so the result is always `/`-separated regardless of host OS.
+fn posix_join(base: &str, child: &str) -> String {
+    let base = base.trim_end_matches('/');
+    let base = if base.is_empty() { "/" } else { base };
+    let child = child.trim_start_matches('/');
+    if child.is_empty() {
+        return base.to_string();
     }
-    Path::new(root).join(key).to_string_lossy().to_string()
+    if base == "/" {
+        return format!("/{child}");
+    }
+    format!("{base}/{child}")
+}
+
+fn join_root_key(root: &str, key: &str) -> String {
+    posix_join(root, key)
 }
 
 fn resolve_known_hosts_path(explicit: Option<&str>) -> Result<PathBuf> {
@@ -828,10 +839,7 @@ async fn list_recursive(
             if name == "." || name == ".." {
                 continue;
             }
-            let full = Path::new(&*current_dir)
-                .join(&name)
-                .to_string_lossy()
-                .to_string();
+            let full = posix_join(&current_dir, &name);
             let file_type = entry.metadata().file_type();
             if file_type.is_dir() {
                 dirs_to_visit.push(full);
@@ -1083,10 +1091,41 @@ mod tests {
     }
 
     #[test]
+    fn test_posix_join() {
+        // Basic joins
+        assert_eq!(posix_join("/repo", "keys/repokey"), "/repo/keys/repokey");
+        assert_eq!(
+            posix_join("/repo", "packs/ab/deadbeef"),
+            "/repo/packs/ab/deadbeef"
+        );
+
+        // Trailing/leading slash normalization
+        assert_eq!(posix_join("/repo/", "keys"), "/repo/keys");
+        assert_eq!(posix_join("/repo", "/keys"), "/repo/keys");
+        assert_eq!(posix_join("/repo/", "/keys"), "/repo/keys");
+
+        // Empty child returns base unchanged
+        assert_eq!(posix_join("/repo", ""), "/repo");
+
+        // Root-only base preserves "/" when child is empty
+        assert_eq!(posix_join("/", ""), "/");
+        assert_eq!(posix_join("/", "config"), "/config");
+
+        // Never produces backslashes (the actual bug)
+        let result = posix_join("/repo", "packs/ab/deadbeef");
+        assert!(
+            !result.contains('\\'),
+            "posix_join must never produce backslashes: {result}"
+        );
+    }
+
+    #[test]
     fn test_join_root_key() {
         assert_eq!(join_root_key("/", "packs/abc"), "/packs/abc");
         assert_eq!(join_root_key("/repo", "packs/abc"), "/repo/packs/abc");
         assert_eq!(join_root_key("/repo", "/packs/abc"), "/repo/packs/abc");
+        // Root-only repo with empty key (e.g. list("") on SFTP root)
+        assert_eq!(join_root_key("/", ""), "/");
     }
 
     #[test]
