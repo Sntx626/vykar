@@ -685,3 +685,61 @@ Notes:
 - Variable names must match `[A-Za-z_][A-Za-z0-9_]*`.
 - Malformed placeholders fail config loading.
 - No escape syntax is supported for literal `${...}`.
+- `${VAR}` in YAML comments is also expanded (since expansion runs before YAML parsing).
+
+### Loading `.env` files
+
+Use `env_file` to load variables from one or more files before expansion. This is useful for Docker-style `.env` files that store credentials:
+
+```yaml
+env_file: .db.env
+# or multiple files:
+# env_file:
+#   - .db.env
+#   - .app.env
+
+repositories:
+  - url: /backup/repo
+
+sources:
+  - label: databases
+    command_dumps:
+      - name: db.sql
+        command: "mysqldump -u '${DB_USER}' -p'${DB_PASSWORD}' '${DB_DATABASE}'"
+```
+
+Where `.db.env` contains:
+
+```
+DB_USER=myuser
+DB_PASSWORD=s3cret
+DB_DATABASE=myapp
+```
+
+Paths are resolved relative to the config file's directory. The supported `.env` format is:
+
+- `KEY=VALUE` — plain assignment
+- `export KEY=VALUE` — `export` prefix is stripped
+- `KEY="VALUE"` or `KEY='VALUE'` — quotes are stripped
+- Blank lines and lines starting with `#` are skipped
+
+### Shell expansion in `command_dumps`
+
+Commands in `command_dumps` and `hooks` run via `sh -c`, so the shell performs its own variable expansion. There are two ways to reference variables:
+
+| Syntax | Expanded by | On missing var |
+|--------|------------|----------------|
+| `${VAR}` | vykar (at config load) | Hard error |
+| `$VAR` | shell (at runtime) | Empty string (silent) |
+
+When using `env_file`, prefer `${VAR}` — vykar loads the file first, then expands the placeholder, giving you an immediate error if the variable is missing.
+
+If you cannot use `env_file`, you can source the `.env` file directly in the command:
+
+```yaml
+command_dumps:
+  - name: db.sql
+    command: ". /path/to/.db.env && mysqldump -u $DB_USER -p$DB_PASSWORD $DB_DATABASE"
+```
+
+This pattern is self-contained and works without any wrapper script, but missing variables will silently produce empty strings.

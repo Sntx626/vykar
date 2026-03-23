@@ -12,6 +12,12 @@
 #   Use env placeholders in values (see docs for exact syntax).
 #   Avoid writing placeholder syntax in comments, because expansion runs
 #   before YAML parsing.
+#
+# Load variables from .env files (Docker-style KEY=VALUE):
+# env_file: .db.env
+# env_file:
+#   - .db.env
+#   - .app.env
 
 # --- Minimal runnable config -------------------------------------------------
 
@@ -90,6 +96,15 @@ compression:
 #     command_dumps:
 #       - name: all-databases.sql
 #         command: pg_dumpall -U postgres
+#
+# Using env_file with command_dumps for credentials:
+#
+# env_file: .db.env          # loads DB_USER, DB_PASSWORD, DB_DATABASE
+# sources:
+#   - label: databases
+#     command_dumps:
+#       - name: myapp.sql
+#         command: "mysqldump -u '${DB_USER}' -p'${DB_PASSWORD}' '${DB_DATABASE}'"
 
 # --- Repositories (where backups go) ----------------------------------------
 
