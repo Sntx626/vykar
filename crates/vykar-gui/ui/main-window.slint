@@ -56,6 +56,7 @@ export component MainWindow inherits Window {
     in-out property <string> config_path;
     in-out property <string> schedule_text;
     in-out property <string> status_text;
+    in-out property <string> version_text;
     in-out property <[[StandardListViewItem]]> log_rows: [];
 
     // Operation busy state — disables all action buttons
@@ -487,6 +488,7 @@ export component MainWindow inherits Window {
 
             Text { text: "Status:"; vertical-alignment: center; }
             Text { text: root.status_text; vertical-alignment: center; horizontal-stretch: 1; }
+            Text { text: root.version_text; vertical-alignment: center; color: #888888; }
         }
     }
     }

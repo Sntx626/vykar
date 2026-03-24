@@ -98,6 +98,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .into(),
     );
     ui.set_status_text("Idle".into());
+    ui.set_version_text(format!("v{}", env!("CARGO_PKG_VERSION")).into());
 
     // Seed the AppData global with the initial config path.
     ui.global::<AppData>()
