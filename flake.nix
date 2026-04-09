@@ -8,7 +8,13 @@
     };
     flake-utils.url = "github:numtide/flake-utils";
 
-    # Pre-built Skia binaries for vykar-gui (must match skia-bindings version in Cargo.lock)
+    # Pre-built Skia binaries for vykar-gui (must match skia-bindings version in Cargo.lock).
+    #
+    # To update after a skia-bindings bump:
+    #   1. Find the new version tag at https://github.com/rust-skia/skia-binaries/releases that matches the skia-bindings version in Cargo.lock.
+    #   2. Update the version (e.g. 0.90.0) and binary hash in each URL below.
+    #      The hash component in the filename corresponds to the crate source hash and changes with each skia-bindings release.
+    #   3. Run `nix flake update` to re-fetch and update the locks.
     skia-binaries-x86_64-linux = {
       type = "file";
       url = "https://github.com/rust-skia/skia-binaries/releases/download/0.90.0/skia-binaries-da4579b39b75fa2187c5-x86_64-unknown-linux-gnu-gl-pdf-textlayout-vulkan.tar.gz";
