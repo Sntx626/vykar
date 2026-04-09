@@ -13,3 +13,6 @@ fuzz/target/
 
 # Nix build artifacts
 /result
+
+# Personal direnv config
+.envrc
